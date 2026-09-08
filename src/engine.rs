@@ -9,6 +9,7 @@ use crate::features::compute_window;
 use crate::preprocess::{self, ChannelChunk};
 use crate::types::PipelineEvent;
 
+// runs da pipes
 pub fn run_pipeline(config: AppConfig, progress_tx: Sender<PipelineEvent>) -> Result<(), String> {
     if !config.data_dir.exists() {
         return Err(format!("Data directory not found: {:?}", config.data_dir));
