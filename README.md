@@ -4,7 +4,9 @@ Sismokaos CLI is a command-line interface tool for preprocessing and feature ext
 
 ## Features
 
-- Parse and process miniSEED files from a local directory.
+- Parse and process miniSEED files from a local directory. `.zip` files in it
+  are read too: their members are inflated to `<out-dir>/.unzipped-<pid>/` for
+  the run and deleted afterwards, so expect that much free disk.
 - Stream-safe preprocessing pipeline (gap fill, detrend, bandpass, decimation).
 - Full feature extraction pipeline (`run`) producing per-window engineered features.
 - Preprocess-only pipeline (`preprocess`) producing filtered/decimated component streams without feature extraction.

@@ -4,7 +4,7 @@ use rayon::prelude::*;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use crate::config::AppConfig;
@@ -63,17 +63,20 @@ pub fn preprocess_directory_chunked(
     config: &AppConfig,
     mut on_chunk: impl FnMut(ChannelChunk) -> Result<(), String>,
 ) -> Result<(), String> {
-    let mut files: Vec<PathBuf> = fs::read_dir(data_dir)
+    let listed: Vec<PathBuf> = fs::read_dir(data_dir)
         .map_err(|e| format!("Failed to read data directory {:?}: {}", data_dir, e))?
         .filter_map(Result::ok)
         .map(|entry| entry.path())
         .filter(|p| p.is_file())
         .collect();
-    files.sort();
 
-    if files.is_empty() {
+    if listed.is_empty() {
         return Err(format!("No files found in data directory: {:?}", data_dir));
     }
+
+    // Held until the function returns: dropping it deletes the inflated members.
+    let (mut files, _unzipped) = expand_zips(listed, &config.output_root)?;
+    files.sort();
 
     let (mut index, native_fs) = build_index(&files)?;
     index.sort_by(|a, b| a.start_epoch.total_cmp(&b.start_epoch));
@@ -291,6 +294,96 @@ fn flush_block(
     asm.context.push(next_context);
 
     Ok(())
+}
+
+/// Zip members inflated to disk for the duration of one run.
+///
+/// The reader seeks straight to each record's byte offset, which a deflate
+/// stream cannot do, so members are inflated to plain files first. They go
+/// under the output directory rather than into memory -- one station's
+/// archive is several GB uncompressed -- and are removed on drop, so an
+/// erroring run cleans up too.
+struct UnzippedInputs {
+    dir: Option<PathBuf>,
+}
+
+impl Drop for UnzippedInputs {
+    fn drop(&mut self) {
+        if let Some(dir) = &self.dir {
+            let _ = fs::remove_dir_all(dir);
+        }
+    }
+}
+
+fn is_zip(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))
+}
+
+/// Replaces every `.zip` in `listed` with its inflated members; other files
+/// pass through untouched.
+fn expand_zips(
+    listed: Vec<PathBuf>,
+    staging_root: &Path,
+) -> Result<(Vec<PathBuf>, UnzippedInputs), String> {
+    let (zips, mut files): (Vec<PathBuf>, Vec<PathBuf>) =
+        listed.into_iter().partition(|p| is_zip(p));
+    let mut guard = UnzippedInputs { dir: None };
+    if zips.is_empty() {
+        return Ok((files, guard));
+    }
+
+    let dir = staging_root.join(format!(".unzipped-{}", std::process::id()));
+    fs::create_dir_all(&dir)
+        .map_err(|e| format!("Failed to create unzip directory {:?}: {}", dir, e))?;
+    guard.dir = Some(dir.clone());
+
+    let inflated: Result<Vec<Vec<PathBuf>>, String> = zips
+        .par_iter()
+        .map(|zip_path| {
+            let open_err =
+                |e: zip::result::ZipError| format!("Failed to read zip {:?}: {}", zip_path, e);
+            let handle = File::open(zip_path)
+                .map_err(|e| format!("Failed to open {:?}: {}", zip_path, e))?;
+            let mut archive = zip::ZipArchive::new(handle).map_err(open_err)?;
+            let zip_stem = zip_path.file_stem().unwrap_or_default().to_string_lossy();
+
+            let mut out = Vec::with_capacity(archive.len());
+            for i in 0..archive.len() {
+                let mut member = archive.by_index(i).map_err(open_err)?;
+                if !member.is_file() {
+                    continue;
+                }
+                // Flattened and prefixed with the zip's stem: members of
+                // different zips may share a name, and a member's own path
+                // is not trusted to stay inside `dir`.
+                let name = member
+                    .enclosed_name()
+                    .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+                    .ok_or_else(|| {
+                        format!("Unsafe member name {:?} in {:?}", member.name(), zip_path)
+                    })?;
+                let dest = dir.join(format!("{}__{}", zip_stem, name));
+                let mut writer = std::io::BufWriter::new(
+                    File::create(&dest)
+                        .map_err(|e| format!("Failed to create {:?}: {}", dest, e))?,
+                );
+                std::io::copy(&mut member, &mut writer)
+                    .and_then(|_| writer.flush())
+                    .map_err(|e| {
+                        format!("Failed to inflate {:?} from {:?}: {}", name, zip_path, e)
+                    })?;
+                out.push(dest);
+            }
+            Ok(out)
+        })
+        .collect();
+
+    files.extend(inflated?.into_iter().flatten());
+    if files.is_empty() {
+        return Err("The input zips contain no files".to_string());
+    }
+    Ok((files, guard))
 }
 
 fn build_index(files: &[PathBuf]) -> Result<(Vec<RecordRef>, f64), String> {
@@ -872,6 +965,10 @@ mod tests {
         data[500] = f64::NAN;
         detrend_linear(&mut data);
         assert!(data[10].is_nan() && data[500].is_nan());
-        assert!(data.iter().filter(|v| v.is_finite()).all(|v| v.abs() < 1e-6));
+        assert!(
+            data.iter()
+                .filter(|v| v.is_finite())
+                .all(|v| v.abs() < 1e-6)
+        );
     }
 }
