@@ -63,6 +63,10 @@ pub fn run_preprocess_only(
         total += len as u64;
 
         let _ = progress_tx.send(PipelineEvent::ChunkProcessed(len));
+        let _ = progress_tx.send(PipelineEvent::Progress {
+            done: chunk.records_done,
+            total: chunk.records_total,
+        });
         Ok(())
     })?;
 

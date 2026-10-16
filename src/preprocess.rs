@@ -35,6 +35,11 @@ pub struct ChannelChunk {
     pub z_interp: Vec<bool>,
     pub fs: f64,
     pub start_epoch: f64,
+    /// Input records read so far, out of `records_total`. Every record is
+    /// indexed before any is read, so this is an exact progress fraction;
+    /// the window count is not known until the data have been assembled.
+    pub records_done: usize,
+    pub records_total: usize,
 }
 
 const COMPONENTS: [char; 3] = ['E', 'N', 'Z'];
@@ -47,6 +52,8 @@ struct Assembler {
     context: Vec<HashMap<char, Vec<f64>>>,
     global_offset: usize,
     dropped_late_records: usize,
+    records_done: usize,
+    records_total: usize,
 }
 
 struct RecordRef {
@@ -89,6 +96,8 @@ pub fn preprocess_directory_chunked(
         context: Vec::new(),
         global_offset: 0,
         dropped_late_records: 0,
+        records_done: 0,
+        records_total: index.len(),
     };
 
     if let Some(warning) = config.check_decimation(native_fs) {
@@ -102,7 +111,7 @@ pub fn preprocess_directory_chunked(
     let mut file_cache: Vec<(u32, File)> = Vec::with_capacity(8);
     let mut raw = Vec::new();
 
-    for r in &index {
+    for (i, r) in index.iter().enumerate() {
         let file_path = &files[r.file as usize];
         raw.resize(r.len as usize, 0u8);
 
@@ -167,6 +176,7 @@ pub fn preprocess_directory_chunked(
         }
 
         copy_record_samples(&rec, count, &mut dest[idx..idx + count], file_path)?;
+        asm.records_done = i + 1;
 
         asm.watermark = asm
             .watermark
@@ -184,6 +194,8 @@ pub fn preprocess_directory_chunked(
         }
     }
 
+    // Skipped records never advanced the count; every record is read now.
+    asm.records_done = asm.records_total;
     while asm.comps.values().any(|v| !v.is_empty()) {
         flush_block(
             &mut asm,
@@ -283,6 +295,8 @@ fn flush_block(
         z_interp,
         fs: out_fs,
         start_epoch: asm.start_epoch,
+        records_done: asm.records_done,
+        records_total: asm.records_total,
     })?;
 
     for v in asm.comps.values_mut() {
@@ -315,6 +329,44 @@ impl Drop for UnzippedInputs {
     }
 }
 
+/// Deletes `.unzipped-<pid>` directories left by runs that were killed, which
+/// skips `Drop`: Ctrl-C included, since release builds do not unwind. A
+/// directory whose process is still alive belongs to a concurrent run into
+/// the same output directory and is left alone.
+fn remove_stale_unzip_dirs(staging_root: &Path) {
+    let Ok(entries) = fs::read_dir(staging_root) else {
+        return;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let name = entry.file_name();
+        let Some(pid) = name
+            .to_str()
+            .and_then(|n| n.strip_prefix(".unzipped-"))
+            .and_then(|p| p.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if !process_alive(pid) {
+            eprintln!(
+                "[INFO] Removing {:?}, left by an interrupted run",
+                entry.path()
+            );
+            let _ = fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn process_alive(pid: u32) -> bool {
+    Path::new("/proc").join(pid.to_string()).exists()
+}
+
+/// Without /proc there is no cheap liveness check; assume alive and keep it.
+#[cfg(not(target_os = "linux"))]
+fn process_alive(_pid: u32) -> bool {
+    true
+}
+
 fn is_zip(path: &Path) -> bool {
     path.extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))
@@ -333,6 +385,7 @@ fn expand_zips(
         return Ok((files, guard));
     }
 
+    remove_stale_unzip_dirs(staging_root);
     let dir = staging_root.join(format!(".unzipped-{}", std::process::id()));
     fs::create_dir_all(&dir)
         .map_err(|e| format!("Failed to create unzip directory {:?}: {}", dir, e))?;

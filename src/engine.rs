@@ -60,6 +60,10 @@ pub fn run_pipeline(config: AppConfig, progress_tx: Sender<PipelineEvent>) -> Re
     // Consume chunks as they arrive asynchronously
     for chunk in chunk_rx {
         fs_out = chunk.fs;
+        let progress = PipelineEvent::Progress {
+            done: chunk.records_done,
+            total: chunk.records_total,
+        };
         let expected_next_epoch = current_buffer_epoch + (buf_e.len() as f64 / fs_out);
 
         if current_buffer_epoch.is_nan()
@@ -172,6 +176,10 @@ pub fn run_pipeline(config: AppConfig, progress_tx: Sender<PipelineEvent>) -> Re
             current_buffer_epoch += cursor as f64 / fs_out;
             global_offset += cursor;
         }
+
+        // Sent once the chunk's windows are written, so the bar tracks
+        // finished work rather than what the preprocessor has read ahead.
+        let _ = progress_tx.send(progress);
     }
 
     preprocessor_thread

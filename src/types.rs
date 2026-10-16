@@ -1,11 +1,16 @@
 /// Represents an event emitted by the background processing pipeline.
 ///
-/// The pipeline streams: it discovers how much data there is as it goes, so events report
-/// progress made rather than progress against a known total.
+/// The pipeline streams, so the number of windows is not known up front. Progress is
+/// reported in input records instead, which are all indexed before processing starts.
 #[derive(Debug)]
 pub enum PipelineEvent {
     /// Started processing the input directory
     FolderStarted(String),
+    /// Input records consumed so far, out of the total indexed
+    Progress {
+        done: usize,
+        total: usize,
+    },
     /// Successfully computed and wrote a single window
     ChunkProcessed(usize),
     WindowProcessed,
