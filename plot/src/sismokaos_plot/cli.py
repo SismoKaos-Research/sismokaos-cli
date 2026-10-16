@@ -5,14 +5,18 @@ for longer than ``--era-gap-days``, and drawn one page per feature group per
 era. Pages go to ``<out>/<STATION>/<era start>_<era end>/`` as PNGs and, all
 together, into ``<out>/<STATION>/<STATION>_features.pdf``. Every graph is also
 drawn on its own, at high resolution, into that era folder's ``single/``.
+``--before-main`` adds the lead-up to each era's main shock, into
+``main_M<mag>_<time>_minus<N>d/`` and ``<STATION>_mainshock_zooms.pdf``.
 
 Examples:
     sismokaos-plot output/van --out figs/van
     sismokaos-plot output/van/TVAN_*.parquet --around 2011-10-23T10:41:20 --days 7
     sismokaos-plot output/van --dev --station VMUR
+    sismokaos-plot output/van --before-main 30 60 --no-eras
 """
 
 import argparse
+import contextlib
 import dataclasses
 import sys
 from collections import defaultdict
@@ -25,7 +29,7 @@ from matplotlib.backends.backend_pdf import PdfPages
 
 from .catalog import events_near, load_catalog, load_station_coords
 from .features import build_pages, load_station, split_eras, station_of
-from .render import Style, render_page, render_single
+from .render import Style, pick_main, render_page, render_single
 
 # plot/src/sismokaos_plot/cli.py -> the directory holding the sibling repos.
 _PROJECTS = Path(__file__).resolve().parents[4]
@@ -76,6 +80,14 @@ def parse_args(argv=None):
                     help="UTC time to add zoomed pages around (repeatable)")
     ap.add_argument("--days", type=float, default=7.0,
                     help="width of each --around zoom in days (7)")
+    ap.add_argument("--before-main", type=float, nargs="+", default=[],
+                    metavar="DAYS",
+                    help="also draw each era's main shock from DAYS before it, "
+                         "e.g. --before-main 30 60")
+    ap.add_argument("--after-main", type=float, default=1.0, metavar="DAYS",
+                    help="...up to this many days after it (1)")
+    ap.add_argument("--no-eras", action="store_true",
+                    help="skip the whole-era figures (draw only zooms)")
     ap.add_argument("--no-pdf", action="store_true")
     ap.add_argument("--no-single", action="store_true",
                     help="skip the one-figure-per-graph output")
@@ -156,12 +168,29 @@ def main(argv=None):
 
         out = args.out / station
         out.mkdir(parents=True, exist_ok=True)
-        pdf = None if args.no_pdf else PdfPages(out / f"{station}_features{suffix}.pdf")
-        try:
-            for era in split_eras(df, pd.Timedelta(days=args.era_gap_days)):
-                label = f"{era.index[0]:%Y-%m-%d}_{era.index[-1]:%Y-%m-%d}"
-                _render_span(era, events, station, label, out / f"{label}{suffix}",
-                             style, args, pdf)
+        eras = split_eras(df, pd.Timedelta(days=args.era_gap_days))
+
+        with contextlib.ExitStack() as stack:
+            pdfs = {}
+
+            def pdf(name):
+                """The PDF ``name``, opened on first use so a run that draws
+                none of its pages leaves an existing one untouched."""
+                if args.no_pdf:
+                    return None
+                if name not in pdfs:
+                    path = out / f"{station}_{name}{suffix}.pdf"
+                    pdfs[name] = stack.enter_context(PdfPages(path))
+                    stack.callback(print, f"  PDF -> {path}")
+                return pdfs[name]
+
+            if not args.no_eras:
+                for era in eras:
+                    label = f"{era.index[0]:%Y-%m-%d}_{era.index[-1]:%Y-%m-%d}"
+                    _render_span(era, events, station, label,
+                                 out / f"{label}{suffix}", style, args,
+                                 pdf("features"))
+
             for when in args.around:
                 t = pd.Timestamp(when)
                 t = t.tz_convert("UTC").tz_localize(None) if t.tzinfo else t
@@ -173,11 +202,36 @@ def main(argv=None):
                     continue
                 label = f"zoom_{t:%Y%m%dT%H%M}_{args.days:g}d"
                 _render_span(zoom, events, station, label, out / f"{label}{suffix}",
-                             style, args, pdf)
-        finally:
-            if pdf is not None:
-                pdf.close()
-                print(f"  PDF -> {out / f'{station}_features{suffix}.pdf'}")
+                             style, args, pdf("features"))
+
+            # Lead-ups to each era's main shock -- the same event the red
+            # line marks -- ending --after-main days past it.
+            after = pd.Timedelta(days=args.after_main)
+            for era in eras if args.before_main else []:
+                in_era = events[(events["time"] >= era.index[0])
+                                & (events["time"] <= era.index[-1])]
+                main_ev = pick_main(in_era, style)
+                if main_ev is None:
+                    print(f"  [WARN] no M>={style.line_mag:g} within "
+                          f"{style.line_dist_km:g} km in {era.index[0]:%Y-%m-%d}"
+                          f"..{era.index[-1]:%Y-%m-%d}; no main-shock zoom")
+                    continue
+                t = main_ev["time"]
+                for days in args.before_main:
+                    lead = era[(era.index >= t - pd.Timedelta(days=days))
+                               & (era.index <= t + after)]
+                    if lead.empty:
+                        print(f"  [WARN] no {station} data in the {days:g} days "
+                              f"before {t}")
+                        continue
+                    if lead.index[0] > t - pd.Timedelta(days=days) + pd.Timedelta(days=1):
+                        print(f"  [NOTE] data start {lead.index[0]:%Y-%m-%d}, "
+                              f"short of {days:g} days before {t:%Y-%m-%d}")
+                    label = (f"main_M{main_ev['mag']:.1f}_{t:%Y%m%dT%H%M}"
+                             f"_minus{days:g}d")
+                    _render_span(lead, events, station, label,
+                                 out / f"{label}{suffix}", style, args,
+                                 pdf("mainshock_zooms"))
     return 0
 
 
