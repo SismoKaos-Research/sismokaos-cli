@@ -119,7 +119,19 @@ pub fn compute_window(
         .collect();
 
     for (seg, keys) in components {
+        // A component with an unfillable gap gets NaN for every one of its
+        // keys, NOT a missing key. `continue` dropped the keys entirely, and
+        // the parquet schema is built from the FIRST window's key set
+        // (engine.rs), so one gappy opening window retired that component for
+        // the whole run -- silently, and differently per station. Five Aegean
+        // archives came out carrying one component each (MANT E, SEMS N,
+        // DEMI/ELBA/GCAM Z) against the 134-column BODT reference, which made
+        // them incomparable to each other. NaN says "this window, this
+        // component, no reading"; a missing column says nothing at all.
         if seg.iter().any(|&x| x.is_nan()) {
+            for key in keys {
+                result.insert(key, f64::NAN);
+            }
             continue;
         }
 
