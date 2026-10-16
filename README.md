@@ -102,3 +102,20 @@ Dry-run (validate config/args only):
 ```bash
 sismokaos-cli --config config.json preprocess --data-dir ./data --out-dir ./output --dry-run
 ```
+
+## Plotting features
+
+`plot/` is a small Python package that draws every feature of one or more
+`run` outputs against the AFAD catalog: per station, per era (split at data
+gaps over 30 days), one page per feature group plus one high-resolution
+figure per feature and component, each with an event lane on top.
+
+```bash
+uv run --project plot sismokaos-plot output/van --out figs/van
+uv run --project plot sismokaos-plot output/van --station TVAN \
+    --around 2011-10-23T10:41:20 --days 7
+```
+
+The catalog and station list default to `../data_downloader/catalogs/`;
+see `sismokaos-plot --help` for the event radius, line thresholds and output
+options.

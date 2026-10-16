@@ -1,0 +1,21 @@
+[project]
+name = "sismokaos-plot"
+version = "0.1.0"
+description = "Plots sismokaos-cli feature parquets against the earthquake catalog"
+requires-python = ">=3.11"
+dependencies = [
+    "matplotlib>=3.9",
+    "numpy>=2.0",
+    "pandas>=2.2",
+    "pyarrow>=17.0",
+]
+
+[project.scripts]
+sismokaos-plot = "sismokaos_plot.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
+
+[build-system]
+requires = ["uv_build>=0.8,<1"]
+build-backend = "uv_build"

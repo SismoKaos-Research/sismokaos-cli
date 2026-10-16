@@ -7,3 +7,9 @@ bodt_q1_chaos_5hz/
 
 # Pipeline outputs.
 output/
+
+# Rendered figures, and Python environments and caches.
+figs/
+.venv/
+__pycache__/
+.pytest_cache/
