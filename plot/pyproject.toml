@@ -12,6 +12,9 @@ dependencies = [
 
 [project.scripts]
 sismokaos-plot = "sismokaos_plot.cli:main"
+sismokaos-thresholds = "sismokaos_plot.thresholds:main"
+sismokaos-threshold-figs = "sismokaos_plot.threshold_figs:main"
+sismokaos-threshold-raw = "sismokaos_plot.threshold_raw:main"
 
 [dependency-groups]
 dev = ["pytest>=8.0"]

@@ -114,6 +114,27 @@ figure per feature and component, each with an event lane on top.
 uv run --project plot sismokaos-plot output/van --out figs/van
 uv run --project plot sismokaos-plot output/van --station TVAN \
     --around 2011-10-23T10:41:20 --days 7
+uv run --project plot sismokaos-plot output/van --before-main 30 60 --no-eras
+```
+
+`--before-main` draws each era's lead-up to its main shock (the largest
+M>=4.5 within 100 km).
+
+### Threshold crossings against the catalog
+
+`sismokaos-thresholds` puts lower and upper bounds at percentiles of each
+feature and scores how often windows crossing them hold a catalog event:
+precision, recall, and lift over chance. `--exclude-after-main` keeps the
+aftershock sequence from dominating. `sismokaos-threshold-figs` draws the
+summary figures from its CSVs, and `sismokaos-threshold-raw` draws every
+feature's values with its bounds and crossings.
+
+```bash
+uv run --project plot sismokaos-thresholds output/van --out figs/van/thresholds/all.csv
+uv run --project plot sismokaos-thresholds output/van --exclude-after-main \
+    --out figs/van/thresholds/pre_main.csv
+uv run --project plot sismokaos-threshold-figs figs/van/thresholds --data output/van
+uv run --project plot sismokaos-threshold-raw output/van --out figs/van/thresholds/raw
 ```
 
 The catalog and station list default to `../data_downloader/catalogs/`;
