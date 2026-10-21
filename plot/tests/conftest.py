@@ -68,3 +68,37 @@ def run_parquet(tmp_path):
         (out / f"{name}_features.run_metadata.json").write_text(
             json.dumps({"station": "TVAN", "step_sec": 50}))
     return out
+
+
+CHAOS = ["WOLF_LYE", "ROS_SHORT", "ROS_LONG", "CORR_DIM", "SAMP_ENT"]
+# Band name -> (window s, step s, windows): about 55 h each, from 2011-10-22,
+# so the M6.7 and the events after it fall inside.
+BANDS = {"0.1-1Hz": (400, 100, 2000), "1-5Hz": (40, 50, 4000)}
+
+
+@pytest.fixture
+def bands_run(tmp_path):
+    """A chaos-only bands run of TVAN as the CLI writes it: <out-dir>/<band>/."""
+    out = tmp_path / "bands_out"
+    keep = ["Pencere_ID", "Zaman_Dk", *(f"{c}_INTERP_FRAC" for c in "ENZ"),
+            *(f"{c}_{f}" for c in "ENZ" for f in CHAOS)]
+    for band, (win, step, n) in BANDS.items():
+        folder = out / band
+        folder.mkdir(parents=True)
+        df = make_features("2011-10-22", n, step_s=step)
+        df[keep].to_parquet(folder / "TVAN_2011_BH_chaos_features.parquet")
+        (folder / "TVAN_2011_BH_chaos_features.run_metadata.json").write_text(
+            json.dumps({"station": "TVAN", "band": band, "win_sec": win,
+                        "step_sec": step}))
+    return out
+
+
+@pytest.fixture
+def catalog_with_foreshock(tmp_path):
+    """The catalog plus an event the day before the M6.7, so the pre-main
+    analysis has something to match."""
+    path = tmp_path / "catalog_foreshock.csv"
+    path.write_text(CATALOG_CSV
+                    + "22/10/2011 12:00:00,43.40,38.70,10.0,0.5,Ml,3.5,Tuşba (Van),3\n",
+                    encoding="utf-8")
+    return path

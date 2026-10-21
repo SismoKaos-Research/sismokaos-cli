@@ -219,6 +219,15 @@ uv run --project plot sismokaos-plot output/van --before-main 30 60 --no-eras
 `--before-main` draws each era's lead-up to its main shock (the largest
 M>=4.5 within 100 km).
 
+A run with a `bands` config is drawn one band at a time, into
+`<out>/<STATION>/<band>/`, with the band in every title; a folder input is
+searched one level down, so the run's `--out-dir` is enough. `--band` picks
+bands.
+
+```bash
+uv run --project plot sismokaos-plot output/focus_chaos --out figs/focus --before-main 30 60
+```
+
 ### Threshold crossings against the catalog
 
 `sismokaos-thresholds` puts lower and upper bounds at percentiles of each
@@ -227,6 +236,12 @@ precision, recall, and lift over chance. `--exclude-after-main` keeps the
 aftershock sequence from dominating. `sismokaos-threshold-figs` draws the
 summary figures from its CSVs, and `sismokaos-threshold-raw` draws every
 feature's values with its bounds and crossings.
+
+All three keep bands apart: each band is scored with its own window length
+(from the run metadata; `--win-sec` overrides it), pooled across stations
+only within a band, and drawn as `<figure>_<band>.png` or under
+`<STA>/<band>/`. A crossing counts when an event lies in the window, so lift
+measures detection of events, not anticipation of them.
 
 ```bash
 uv run --project plot sismokaos-thresholds output/van --out figs/van/thresholds/all.csv

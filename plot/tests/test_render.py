@@ -49,3 +49,4 @@ def test_main_shock_lead_up_zooms(run_parquet, catalog_csv, stations_csv,
     # --no-eras drew no era pages, so it must not clobber the era PDF.
     assert not (station / "TVAN_features.pdf").exists()
     assert "no main-shock zoom" in capsys.readouterr().out
+

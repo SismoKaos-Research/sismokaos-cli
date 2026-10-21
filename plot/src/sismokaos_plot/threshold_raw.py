@@ -14,6 +14,9 @@ numbers here equal its CSVs. Two sets are drawn, one per analysis:
     <out>/pre_main/<STA>/<era>/<column>.png  only data before each era's
                                              main shock, bounds from that
 
+A ``bands`` run gets one more level, ``<STA>/<band>/<era>/``, and each band
+its own window length from the run metadata.
+
 Example:
     sismokaos-threshold-raw output/van --out figs/van/thresholds/raw
 """
@@ -22,7 +25,6 @@ import argparse
 import multiprocessing
 import os
 import sys
-from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
@@ -36,8 +38,8 @@ import pandas as pd  # noqa: E402
 
 from .catalog import events_near, load_catalog, load_station_coords  # noqa: E402
 from .cli import DEFAULT_CATALOG, DEFAULT_STATIONS, find_parquets  # noqa: E402
-from .features import (break_gaps, feature_columns, load_station,  # noqa: E402
-                       masked, split_eras, station_of)
+from .features import (break_gaps, feature_columns, group_runs,  # noqa: E402
+                       load_station, masked, split_eras, win_sec_of)
 from .render import Style, pick_main, robust_limits  # noqa: E402
 from .threshold_figs import (EVENT, GRID, INK, INK_2, SURFACE,  # noqa: E402
                              _style)
@@ -175,8 +177,8 @@ def _label_bounds(ax, bounds, inks, mark_q, min_gap=0.03):
                     fontsize=7, color=INK if q == mark_q else inks[q])
 
 
-def station_job(station, parquets, mode, opts):
-    """All figures for one station and mode; runs in a worker process."""
+def station_job(station, band, parquets, mode, opts):
+    """All figures for one station, band and mode; runs in a worker process."""
     _style()
     catalog = load_catalog(opts["catalog"])
     coords = load_station_coords(opts["stations"])
@@ -184,7 +186,10 @@ def station_job(station, parquets, mode, opts):
         return station, mode, 0, [f"[WARN] no coordinates for {station}; skipped"]
     df = load_station(parquets)
     events = events_near(catalog, coords[station], 300.0)
-    reach = np.timedelta64(int((opts["win_sec"] + opts["travel_sec"]) * 1e9), "ns")
+    win_sec = opts["win_sec"] or win_sec_of(parquets) or 200.0
+    reach = np.timedelta64(int((win_sec + opts["travel_sec"]) * 1e9), "ns")
+    name = f"{station} {band}" if band else station
+    base = opts["out"] / mode / station / band if band else opts["out"] / mode / station
     made, notes = 0, []
     for era in split_eras(df, pd.Timedelta(days=opts["era_gap_days"])):
         t0, t1 = era.index[0], era.index[-1]
@@ -197,14 +202,14 @@ def station_job(station, parquets, mode, opts):
         if era.empty:
             continue
         label = f"{era.index[0]:%Y-%m-%d}_{era.index[-1]:%Y-%m-%d}"
-        folder = opts["out"] / mode / station / label
+        folder = base / label
         for column in feature_columns(era.columns, dev=False):
             r = fig_raw(era, column, ev, main, opts["q"], opts["mark_q"], reach,
-                        opts["max_interp"], station, mode, folder / f"{column}.png",
+                        opts["max_interp"], name, mode, folder / f"{column}.png",
                         opts["dpi"])
             made += r is not None
-        notes.append(f"{mode:8s} {station} {label}")
-    return station, mode, made, notes
+        notes.append(f"{mode:8s} {name} {label}")
+    return name, mode, made, notes
 
 
 def parse_args(argv=None):
@@ -215,12 +220,14 @@ def parse_args(argv=None):
     ap.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG)
     ap.add_argument("--stations", type=Path, default=DEFAULT_STATIONS)
     ap.add_argument("--station", action="append", help="only these stations")
+    ap.add_argument("--band", action="append", help="only these bands, e.g. 1-5Hz")
     ap.add_argument("--mode", choices=list(MODES), action="append",
                     help="which analysis to draw (default: both)")
     ap.add_argument("--q", type=float, nargs="+", default=[5, 1, 0.5, 0.1])
     ap.add_argument("--mark-q", type=float, default=1.0,
                     help="q whose crossings are marked (1)")
-    ap.add_argument("--win-sec", type=float, default=200.0)
+    ap.add_argument("--win-sec", type=float, default=None,
+                    help="window length in s; default: each run's metadata, else 200")
     ap.add_argument("--travel-sec", type=float, default=90.0)
     ap.add_argument("--max-interp", type=float, default=0.5)
     ap.add_argument("--era-gap-days", type=float, default=30.0)
@@ -233,15 +240,15 @@ def main(argv=None):
     args = parse_args(argv)
     if args.mark_q not in args.q:
         raise SystemExit(f"[ERROR] --mark-q {args.mark_q:g} is not among --q")
-    by_station = defaultdict(list)
-    for p in find_parquets(args.inputs):
-        by_station[station_of(p)].append(p)
+    runs = group_runs(find_parquets(args.inputs))
     if args.station:
-        by_station = {s: ps for s, ps in by_station.items() if s in args.station}
+        runs = {k: ps for k, ps in runs.items() if k[0] in args.station}
+    if args.band:
+        runs = {k: ps for k, ps in runs.items() if k[1] in args.band}
     opts = {k: getattr(args, k) for k in ("catalog", "stations", "q", "mark_q",
                                           "win_sec", "travel_sec", "max_interp",
                                           "era_gap_days", "dpi", "out")}
-    jobs = [(s, ps, m, opts) for s, ps in sorted(by_station.items())
+    jobs = [(s, b, ps, m, opts) for (s, b), ps in runs.items()
             for m in (args.mode or list(MODES))]
     total = 0
     # spawn, not fork: pyarrow has threads running by now, and forking a

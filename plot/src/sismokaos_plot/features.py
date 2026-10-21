@@ -98,14 +98,52 @@ def build_pages(columns, dev: bool = False) -> list[Page]:
     return pages
 
 
+def _metadata(parquet: Path) -> dict:
+    meta = parquet.with_suffix(".run_metadata.json")
+    return json.loads(meta.read_text()) if meta.is_file() else {}
+
+
 def station_of(parquet: Path) -> str:
     """The station recorded in the run's metadata, else the filename prefix."""
-    meta = parquet.with_suffix(".run_metadata.json")
-    if meta.is_file():
-        station = json.loads(meta.read_text()).get("station")
-        if station:
-            return str(station)
+    station = _metadata(parquet).get("station")
+    if station:
+        return str(station)
     return parquet.name.split("_")[0]
+
+
+def band_of(parquet: Path) -> str | None:
+    """The frequency band a ``bands`` run recorded, else None (a single-band
+    run, or one made before bands existed)."""
+    band = _metadata(parquet).get("band")
+    return str(band) if band else None
+
+
+def band_sort_key(band: str | None):
+    """Orders bands low to high by their lower edge; unparseable names last."""
+    if band is None:
+        return (-1.0, "")
+    try:
+        return (float(band.split("-", 1)[0]), band)
+    except ValueError:
+        return (float("inf"), band)
+
+
+def group_runs(parquets) -> dict[tuple[str, str | None], list[Path]]:
+    """(station, band) -> parquets, sorted by station then band. Bands are
+    never merged: each has its own windows, rate and calibration."""
+    runs: dict[tuple[str, str | None], list[Path]] = {}
+    for p in parquets:
+        runs.setdefault((station_of(p), band_of(p)), []).append(p)
+    return dict(sorted(runs.items(), key=lambda kv: (kv[0][0], band_sort_key(kv[0][1]))))
+
+
+def win_sec_of(parquets) -> float | None:
+    """The window length the runs recorded, or None if none did."""
+    for p in parquets:
+        win = _metadata(p).get("win_sec")
+        if win:
+            return float(win)
+    return None
 
 
 def load_station(parquets: list[Path]) -> pd.DataFrame:
@@ -159,3 +197,4 @@ def break_gaps(series: pd.Series, max_step: pd.Timedelta):
         return t, v
     mid = t[gaps] + (t[gaps + 1] - t[gaps]) / 2
     return np.insert(t, gaps + 1, mid), np.insert(v, gaps + 1, np.nan)
+

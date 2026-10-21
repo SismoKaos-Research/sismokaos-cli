@@ -12,6 +12,9 @@ Reads the per station-era CSVs that tool writes and draws:
 Feature types pool their components (E/N/Z, or EN/EZ/NZ for
 cross-correlation): their counts are summed and the ratios recomputed.
 
+CSVs of a ``bands`` run get every figure once per band, named
+``<figure>_<band>.png``; bands are never pooled together.
+
 Example:
     sismokaos-threshold-figs figs/van/thresholds --data output/van --station VMUR
 """
@@ -33,7 +36,8 @@ from matplotlib.colors import LinearSegmentedColormap, TwoSlopeNorm  # noqa: E40
 
 from .catalog import events_near, load_catalog, load_station_coords  # noqa: E402
 from .cli import DEFAULT_CATALOG, DEFAULT_STATIONS, find_parquets  # noqa: E402
-from .features import PAGES, load_station, masked, split_eras, station_of  # noqa: E402
+from .features import (PAGES, band_sort_key, group_runs, load_station,  # noqa: E402
+                       masked, split_eras, win_sec_of)
 from .render import Style, pick_main  # noqa: E402
 from .thresholds import detectable, finish, match_windows  # noqa: E402
 
@@ -232,7 +236,7 @@ def fig_stations(table, name, out, title, pairs, q=1.0):
     return path
 
 
-def fig_pre_vs_all(pre, every, out, pairs):
+def fig_pre_vs_all(pre, every, out, pairs, name="pre_vs_all", title=""):
     a = pooled_by_type(every)
     b = pooled_by_type(pre)
     qs = sorted(a["q"].unique(), reverse=True)
@@ -252,21 +256,27 @@ def fig_pre_vs_all(pre, every, out, pairs):
         ax.set_yscale("log")
     np.atleast_1d(axes)[0].set_ylabel("lift (1 = chance)")
     np.atleast_1d(axes)[-1].legend(frameon=False, fontsize=8, loc="upper left")
-    fig.suptitle("Lift with and without the aftershock sequence, by q",
+    fig.suptitle(f"{title}Lift with and without the aftershock sequence, by q",
                  fontsize=11, x=0.02, ha="left")
     fig.tight_layout()
-    path = out / "pre_vs_all.png"
+    path = out / f"{name}.png"
     fig.savefig(path, dpi=200)
     plt.close(fig)
     return path
 
 
 def fig_example(data, station, catalog_path, stations_path, column, side, q,
-                days, out, win_sec=200.0, travel_sec=90.0):
+                days, out, band=None, travel_sec=90.0):
     """A stretch before the main shock: the feature, its bound, crossings
-    coloured by whether they hold an event, and the events themselves."""
-    parquets = [p for p in find_parquets([data]) if station_of(p) == station]
+    coloured by whether they hold an event, and the events themselves.
+    Returns None when ``station`` (in ``band``) has no ``column``."""
+    parquets = group_runs(find_parquets([data])).get((station, band), [])
+    if not parquets:
+        return None
+    win_sec = win_sec_of(parquets) or 200.0
     df = load_station(parquets)
+    if column not in df.columns:
+        return None
     coords = load_station_coords(stations_path)[station]
     events = events_near(load_catalog(catalog_path), coords, 300.0)
     era = split_eras(df, pd.Timedelta(days=30))[0]
@@ -303,7 +313,8 @@ def fig_example(data, station, catalog_path, stations_path, column, side, q,
     lane.set_ylabel("Mag")
     lane.set_ylim(0, max(4.0, ev["mag"].max() + 0.5) if len(ev) else 4.0)
     lane.grid(True, axis="y", color=GRID, lw=0.6)
-    lane.set_title(f"{station}  {column}  ({side} bound at q = {q:g}%): "
+    lane.set_title(f"{station}{f' {band}' if band else ''}  {column}  "
+                   f"({side} bound at q = {q:g}%): "
                    f"{t0:%Y-%m-%d} to {t1:%Y-%m-%d}, before the main shock",
                    fontsize=11, loc="left")
 
@@ -328,10 +339,11 @@ def fig_example(data, station, catalog_path, stations_path, column, side, q,
     ax.xaxis.set_major_locator(loc)
     ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(loc))
     fig.text(0.01, 0.005, "Events: any magnitude within 100 km, M>=3 within 300 km "
-             "(AFAD). A crossing holds an event when an origin lies in its 200 s "
-             "window or up to 90 s before.", fontsize=8, color=INK_2)
+             f"(AFAD). A crossing holds an event when an origin lies in its "
+             f"{win_sec:g} s window or up to {travel_sec:g} s before.",
+             fontsize=8, color=INK_2)
     fig.tight_layout(rect=(0, 0.02, 1, 1))
-    path = out / f"example_crossings_{station}_{column}.png"
+    path = out / f"example_crossings_{station}{f'_{band}' if band else ''}_{column}.png"
     fig.savefig(path, dpi=200)
     plt.close(fig)
     return path
@@ -355,26 +367,42 @@ def parse_args(argv=None):
 def main(argv=None):
     args = parse_args(argv)
     _style()
-    pre = pd.read_csv(args.folder / "pre_main.csv")
-    every = pd.read_csv(args.folder / "all.csv")
-    pairs = best_pairs(pre)
-    made = [
-        fig_heatmap(pre, "pre_main", args.folder,
-                    "Lift of percentile-bound crossings: before each main shock"),
-        fig_heatmap(every, "all", args.folder,
-                    "Lift of percentile-bound crossings: whole eras, aftershocks included"),
-        fig_tradeoff(pre, "pre_main", args.folder,
-                     "Tighter bounds: more precise, fewer events caught (before main shock)",
-                     pairs),
-        fig_stations(pre, "pre_main", args.folder,
-                     "Is the lift consistent across stations? (q = 1%, before main shock)",
-                     pairs + [("CORR_DIM", "lower")]),
-        fig_pre_vs_all(pre, every, args.folder, pairs),
-    ]
-    if args.data:
-        column, side, q = args.example.split(":")
-        made.append(fig_example(args.data, args.station, args.catalog, args.stations,
-                                column, side, float(q), args.days, args.folder))
+    # CSVs from before bands have no band column, and an empty band (a
+    # single-band run) reads back as NaN.
+    pre, every = (pd.read_csv(args.folder / f"{n}.csv") for n in ("pre_main", "all"))
+    pre = pre.assign(band=pre.get("band", pd.Series("", index=pre.index)).fillna(""))
+    every = every.assign(band=every.get("band", pd.Series("", index=every.index)).fillna(""))
+    made = []
+    for band in sorted(pre["band"].unique(), key=lambda b: band_sort_key(b or None)):
+        sfx = f"_{band}" if band else ""
+        head = f"{band}: " if band else ""
+        b_pre, b_every = pre[pre["band"] == band], every[every["band"] == band]
+        pairs = best_pairs(b_pre)
+        made += [
+            fig_heatmap(b_pre, f"pre_main{sfx}", args.folder,
+                        f"{head}Lift of percentile-bound crossings: before each main shock"),
+            fig_heatmap(b_every, f"all{sfx}", args.folder,
+                        f"{head}Lift of percentile-bound crossings: whole eras, "
+                        "aftershocks included"),
+            fig_tradeoff(b_pre, f"pre_main{sfx}", args.folder,
+                         f"{head}Tighter bounds: more precise, fewer events caught "
+                         "(before main shock)", pairs),
+            fig_stations(b_pre, f"pre_main{sfx}", args.folder,
+                         f"{head}Is the lift consistent across stations? "
+                         "(q = 1%, before main shock)",
+                         pairs + [p for p in [("CORR_DIM", "lower")] if p not in pairs]),
+            fig_pre_vs_all(b_pre, b_every, args.folder, pairs, f"pre_vs_all{sfx}", head),
+        ]
+        if args.data:
+            column, side, q = args.example.split(":")
+            path = fig_example(args.data, args.station, args.catalog, args.stations,
+                               column, side, float(q), args.days, args.folder,
+                               band=band or None)
+            if path is None:
+                print(f"[NOTE] no {column} for {args.station}{f' in {band}' if band else ''}; "
+                      "no example figure")
+            else:
+                made.append(path)
     for p in made:
         print(p)
     return 0

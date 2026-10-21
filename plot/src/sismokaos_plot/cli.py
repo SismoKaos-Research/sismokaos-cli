@@ -8,18 +8,23 @@ drawn on its own, at high resolution, into that era folder's ``single/``.
 ``--before-main`` adds the lead-up to each era's main shock, into
 ``main_M<mag>_<time>_minus<N>d/`` and ``<STATION>_mainshock_zooms.pdf``.
 
+Runs made with a ``bands`` config are drawn one band at a time: each band's
+figures go to ``<out>/<STATION>/<band>/`` with the band in every title and
+PDF name. A folder input is searched one level down too, so the run's
+``--out-dir`` covers all its band folders.
+
 Examples:
     sismokaos-plot output/van --out figs/van
     sismokaos-plot output/van/TVAN_*.parquet --around 2011-10-23T10:41:20 --days 7
     sismokaos-plot output/van --dev --station VMUR
     sismokaos-plot output/van --before-main 30 60 --no-eras
+    sismokaos-plot output/focus_chaos --out figs/focus --band 1-5Hz --band 5-20Hz
 """
 
 import argparse
 import contextlib
 import dataclasses
 import sys
-from collections import defaultdict
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -28,7 +33,7 @@ import pandas as pd
 from matplotlib.backends.backend_pdf import PdfPages
 
 from .catalog import events_near, load_catalog, load_station_coords
-from .features import build_pages, load_station, split_eras, station_of
+from .features import build_pages, group_runs, load_station, split_eras
 from .render import Style, pick_main, render_page, render_single
 
 # plot/src/sismokaos_plot/cli.py -> the repo's own copy of the AFAD exports.
@@ -41,7 +46,9 @@ def find_parquets(paths: list[Path]) -> list[Path]:
     found = []
     for p in paths:
         if p.is_dir():
+            # One level down as well: a bands run writes <out-dir>/<band>/.
             found.extend(sorted(p.glob("*_features.parquet")))
+            found.extend(sorted(p.glob("*/*_features.parquet")))
         elif p.is_file():
             found.append(p)
         else:
@@ -63,6 +70,8 @@ def parse_args(argv=None):
                     help="station coordinates CSV (Code, Latitude, Longitude)")
     ap.add_argument("--station", action="append",
                     help="only these stations (repeatable)")
+    ap.add_argument("--band", action="append",
+                    help="only these bands, by name, e.g. 1-5Hz (repeatable)")
     ap.add_argument("--max-dist", type=float, default=300.0,
                     help="km; events further away are not drawn (default 300)")
     ap.add_argument("--line-mag", type=float, default=4.5,
@@ -132,13 +141,15 @@ def _render_span(df, events, station, label, folder, style, args, pdf):
 
 def main(argv=None):
     args = parse_args(argv)
-    by_station = defaultdict(list)
-    for p in find_parquets(args.inputs):
-        by_station[station_of(p)].append(p)
+    by_run = group_runs(find_parquets(args.inputs))
     if args.station:
-        by_station = {s: ps for s, ps in by_station.items() if s in args.station}
-        if not by_station:
+        by_run = {k: ps for k, ps in by_run.items() if k[0] in args.station}
+        if not by_run:
             raise SystemExit(f"[ERROR] none of {args.station} among the inputs")
+    if args.band:
+        by_run = {k: ps for k, ps in by_run.items() if k[1] in args.band}
+        if not by_run:
+            raise SystemExit(f"[ERROR] none of the bands {args.band} among the inputs")
 
     for path, what in ((args.catalog, "catalog"), (args.stations, "station list")):
         if not path.is_file():
@@ -152,8 +163,9 @@ def main(argv=None):
                  line_mag=args.line_mag, line_dist_km=args.line_dist)
     suffix = "_dev" if args.dev else ""
 
-    for station, parquets in sorted(by_station.items()):
-        print(f"{station}: {', '.join(p.name for p in parquets)}")
+    for (station, band), parquets in by_run.items():
+        print(f"{station}{f' {band}' if band else ''}: "
+              f"{', '.join(p.name for p in parquets)}")
         df = load_station(parquets)
         if station in coords:
             events = events_near(catalog, coords[station], args.max_dist)
@@ -166,8 +178,12 @@ def main(argv=None):
         step = pd.Timedelta(np.median(np.diff(df.index.to_numpy())))
         style = dataclasses.replace(base, max_step=step * 2.5)
 
-        out = args.out / station
+        out = args.out / station / band if band else args.out / station
         out.mkdir(parents=True, exist_ok=True)
+        # Titles and PDF names carry the band, so a figure says which it is
+        # once it leaves its folder.
+        prefix = f"{station}_{band}" if band else station
+        title = f"{station}  |  {band}" if band else station
         eras = split_eras(df, pd.Timedelta(days=args.era_gap_days))
 
         with contextlib.ExitStack() as stack:
@@ -179,7 +195,7 @@ def main(argv=None):
                 if args.no_pdf:
                     return None
                 if name not in pdfs:
-                    path = out / f"{station}_{name}{suffix}.pdf"
+                    path = out / f"{prefix}_{name}{suffix}.pdf"
                     pdfs[name] = stack.enter_context(PdfPages(path))
                     stack.callback(print, f"  PDF -> {path}")
                 return pdfs[name]
@@ -187,7 +203,7 @@ def main(argv=None):
             if not args.no_eras:
                 for era in eras:
                     label = f"{era.index[0]:%Y-%m-%d}_{era.index[-1]:%Y-%m-%d}"
-                    _render_span(era, events, station, label,
+                    _render_span(era, events, title, label,
                                  out / f"{label}{suffix}", style, args,
                                  pdf("features"))
 
@@ -197,11 +213,11 @@ def main(argv=None):
                 half = pd.Timedelta(days=args.days / 2)
                 zoom = df[(df.index >= t - half) & (df.index <= t + half)]
                 if zoom.empty:
-                    print(f"  [WARN] no {station} data within {args.days:g} days "
+                    print(f"  [WARN] no {title} data within {args.days:g} days "
                           f"around {t}")
                     continue
                 label = f"zoom_{t:%Y%m%dT%H%M}_{args.days:g}d"
-                _render_span(zoom, events, station, label, out / f"{label}{suffix}",
+                _render_span(zoom, events, title, label, out / f"{label}{suffix}",
                              style, args, pdf("features"))
 
             # Lead-ups to each era's main shock -- the same event the red
@@ -221,7 +237,7 @@ def main(argv=None):
                     lead = era[(era.index >= t - pd.Timedelta(days=days))
                                & (era.index <= t + after)]
                     if lead.empty:
-                        print(f"  [WARN] no {station} data in the {days:g} days "
+                        print(f"  [WARN] no {title} data in the {days:g} days "
                               f"before {t}")
                         continue
                     if lead.index[0] > t - pd.Timedelta(days=days) + pd.Timedelta(days=1):
@@ -229,7 +245,7 @@ def main(argv=None):
                               f"short of {days:g} days before {t:%Y-%m-%d}")
                     label = (f"main_M{main_ev['mag']:.1f}_{t:%Y%m%dT%H%M}"
                              f"_minus{days:g}d")
-                    _render_span(lead, events, station, label,
+                    _render_span(lead, events, title, label,
                                  out / f"{label}{suffix}", style, args,
                                  pdf("mainshock_zooms"))
     return 0
