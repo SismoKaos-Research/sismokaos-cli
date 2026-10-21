@@ -90,6 +90,10 @@ pub fn run_pipeline(mut config: AppConfig, progress_tx: Sender<PipelineEvent>) -
     let mut buf_z_interp: VecDeque<bool> = VecDeque::new();
 
     let mut global_offset: usize = 0;
+    // Samples the next window start lies beyond the end of the buffer. With a
+    // step longer than the window, the step after a chunk's last window can
+    // reach into the next chunk.
+    let mut pending_skip: usize = 0;
     let mut window_idx: usize = 0;
     let mut fs_out = config.fs;
     let mut writer: Option<FeatureWriter> = None;
@@ -115,6 +119,7 @@ pub fn run_pipeline(mut config: AppConfig, progress_tx: Sender<PipelineEvent>) -
             buf_n_interp.clear();
             buf_z_interp.clear();
             current_buffer_epoch = chunk.start_epoch;
+            pending_skip = 0;
         }
         buf_e.extend(chunk.e);
         buf_n.extend(chunk.n);
@@ -133,12 +138,7 @@ pub fn run_pipeline(mut config: AppConfig, progress_tx: Sender<PipelineEvent>) -
             "interpolation mask buffers desynchronised from sample buffers"
         );
 
-        let mut starts = Vec::new();
-        let mut cursor = 0usize;
-        while buf_e.len() - cursor >= config.win_size {
-            starts.push(cursor);
-            cursor += config.step_size;
-        }
+        let (starts, cursor) = window_starts(buf_e.len(), config.win_size, config.step_size, pending_skip);
 
         let mut per_window_config = config.clone();
         per_window_config.fs = fs_out;
@@ -203,6 +203,8 @@ pub fn run_pipeline(mut config: AppConfig, progress_tx: Sender<PipelineEvent>) -
             window_idx += 1;
         }
 
+        pending_skip = cursor.saturating_sub(buf_e.len());
+        let cursor = cursor.min(buf_e.len());
         if cursor > 0 {
             // O(1) instantaneous memory pop via VecDeque
             buf_e.drain(0..cursor);
@@ -243,3 +245,58 @@ pub fn run_pipeline(mut config: AppConfig, progress_tx: Sender<PipelineEvent>) -
     Ok(())
 }
 
+/// Starts of the whole windows in a buffer of `len` samples, the first at
+/// `first`, and the start of the next window, which may lie beyond `len` when
+/// the step is longer than the window.
+fn window_starts(len: usize, win: usize, step: usize, first: usize) -> (Vec<usize>, usize) {
+    let mut starts = Vec::new();
+    let mut cursor = first;
+    while cursor + win <= len {
+        starts.push(cursor);
+        cursor += step;
+    }
+    (starts, cursor)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::window_starts;
+
+    /// Feeds chunk lengths through the same carry-over as `run_pipeline` and
+    /// returns window starts in absolute samples.
+    fn absolute_starts(chunks: &[usize], win: usize, step: usize) -> Vec<usize> {
+        let (mut buffered, mut drained, mut pending) = (0usize, 0usize, 0usize);
+        let mut out = Vec::new();
+        for &n in chunks {
+            buffered += n;
+            let (starts, cursor) = window_starts(buffered, win, step, pending);
+            out.extend(starts.iter().map(|s| drained + s));
+            pending = cursor.saturating_sub(buffered);
+            let cursor = cursor.min(buffered);
+            buffered -= cursor;
+            drained += cursor;
+        }
+        out
+    }
+
+    #[test]
+    fn step_longer_than_window_keeps_a_regular_grid_across_chunks() {
+        // 1-5 Hz band: 1000-sample windows every 1250. Chunk ends that fall
+        // between a window's end and the next start used to underflow the
+        // remaining-length subtraction and loop until memory ran out.
+        let chunks = [1100, 1300, 90_000, 77, 1249, 90_000, 3];
+        let total: usize = chunks.iter().sum();
+        let got = absolute_starts(&chunks, 1000, 1250);
+        let want: Vec<usize> = (0..).map(|k| k * 1250).take_while(|s| s + 1000 <= total).collect();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn overlapping_windows_are_unchanged() {
+        let chunks = [5000, 4321, 999, 12_000];
+        let total: usize = chunks.iter().sum();
+        let got = absolute_starts(&chunks, 1000, 250);
+        let want: Vec<usize> = (0..).map(|k| k * 250).take_while(|s| s + 1000 <= total).collect();
+        assert_eq!(got, want);
+    }
+}
