@@ -252,6 +252,29 @@ only within a band, and drawn as `<figure>_<band>.png` or under
 `<STA>/<band>/`. A crossing counts when an event lies in the window, so lift
 measures detection of events, not anticipation of them.
 
+### Crossings before events
+
+`sismokaos-precursors` asks the forecasting question instead: does a window
+crossing a bound end within `--lead-hours` (1, 6, 24) *before* a target
+event, more often than chance? Windows holding any event within 300 km, or
+ending in its coda (the calibration's `max(300 s, 3·10^((M+0.87)/2))`), are
+dropped first, so an event's own waves cannot score. Targets are M>=3 within
+100 km, and only data before each main shock are used, the main shock being
+a target. The p-value comes from shifting the crossings against the catalog
+by whole days, which keeps their clustering and the daily cycle; the summary
+counts how many of the hundreds of combinations reach p < 0.05 against what
+chance gives.
+
+```bash
+uv run --project plot sismokaos-precursors output/focus_chaos \
+    --out figs/focus/precursors/quiet6h.csv --quiet-hours 6
+```
+
+`--quiet-hours` keeps only targets with no other event nearby in the hours
+before them. Without it, sequences dominate: at Elazig, 41 of 53 one-hour
+low-Wolf "precursor" windows belonged to the 27 Dec 2019 M4.9 sequence, and
+with 6 quiet hours required the 1-5 Hz excess disappears.
+
 ```bash
 uv run --project plot sismokaos-thresholds output/van --out figs/van/thresholds/all.csv
 uv run --project plot sismokaos-thresholds output/van --exclude-after-main \
