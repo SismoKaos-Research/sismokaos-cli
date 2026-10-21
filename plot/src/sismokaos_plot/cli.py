@@ -13,12 +13,21 @@ figures go to ``<out>/<STATION>/<band>/`` with the band in every title and
 PDF name. A folder input is searched one level down too, so the run's
 ``--out-dir`` covers all its band folders.
 
+Daily cycles (cultural noise, thermal) can swamp slow trends. ``--remove-daily``
+takes each feature's median by hour of day out of it, era by era;
+``--night 22-4`` keeps only windows ending in those hours. Hours are local
+mean solar time at the station (``--utc-offset`` to use a clock instead).
+Either one, or ``--daily-profile`` on its own, also draws each feature's
+median by hour into ``daily_profile/``. Their figures go to folders and PDFs
+suffixed ``_nodaily`` or ``_night<start>-<end>``.
+
 Examples:
     sismokaos-plot output/van --out figs/van
     sismokaos-plot output/van/TVAN_*.parquet --around 2011-10-23T10:41:20 --days 7
     sismokaos-plot output/van --dev --station VMUR
     sismokaos-plot output/van --before-main 30 60 --no-eras
     sismokaos-plot output/focus_chaos --out figs/focus --band 1-5Hz --band 5-20Hz
+    sismokaos-plot output/focus_chaos --out figs/focus --remove-daily --before-main 30
 """
 
 import argparse
@@ -33,8 +42,11 @@ import pandas as pd
 from matplotlib.backends.backend_pdf import PdfPages
 
 from .catalog import events_near, load_catalog, load_station_coords
-from .features import build_pages, group_runs, load_station, split_eras
-from .render import Style, pick_main, render_page, render_single
+from .features import (build_pages, daily_profile, feature_columns, group_runs,
+                       in_hours, load_station, remove_daily_cycle, split_eras,
+                       utc_offset_hours)
+from .render import (Style, pick_main, render_daily_profile, render_page,
+                     render_single)
 
 # plot/src/sismokaos_plot/cli.py -> the repo's own copy of the AFAD exports.
 _CATALOGS = Path(__file__).resolve().parents[3] / "catalogs"
@@ -56,6 +68,16 @@ def find_parquets(paths: list[Path]) -> list[Path]:
     if not found:
         raise SystemExit("[ERROR] no *_features.parquet among the inputs")
     return found
+
+
+def _hours(text: str) -> tuple[float, float]:
+    try:
+        start, end = (float(x) for x in text.split("-"))
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected START-END hours, e.g. 22-4: {text!r}")
+    if not (0 <= start < 24 and 0 <= end <= 24) or start == end:
+        raise argparse.ArgumentTypeError(f"hours must be 0-24 and differ: {text!r}")
+    return start, end
 
 
 def parse_args(argv=None):
@@ -85,6 +107,17 @@ def parse_args(argv=None):
     ap.add_argument("--era-gap-days", type=float, default=30.0)
     ap.add_argument("--dev", action="store_true",
                     help="plot the _DEV (first difference) columns instead")
+    daily = ap.add_mutually_exclusive_group()
+    daily.add_argument("--remove-daily", action="store_true",
+                       help="take each feature's median by hour of day out of it")
+    daily.add_argument("--night", type=_hours, metavar="START-END",
+                       help="keep only windows ending in these local hours, e.g. 22-4")
+    ap.add_argument("--daily-profile", action="store_true",
+                    help="draw each feature's median by hour of day "
+                         "(implied by --remove-daily and --night)")
+    ap.add_argument("--utc-offset", type=float, metavar="HOURS",
+                    help="local hours are UTC plus this; default: mean solar "
+                         "time from the station's longitude")
     ap.add_argument("--around", action="append", default=[],
                     help="UTC time to add zoomed pages around (repeatable)")
     ap.add_argument("--days", type=float, default=7.0,
@@ -139,6 +172,22 @@ def _render_span(df, events, station, label, folder, style, args, pdf):
           f"{len(pages)} pages, {singles} single graphs -> {folder}")
 
 
+def _draw_profile(df, columns, offset, clock, title, out, args):
+    """Each feature's median by hour of day, one figure per page, into
+    ``<out>/daily_profile[_dev]/``. Drawn from the whole run, before any
+    daily-cycle option changes it."""
+    profile = daily_profile(df, columns, offset)
+    folder = out / f"daily_profile{'_dev' if args.dev else ''}"
+    folder.mkdir(parents=True, exist_ok=True)
+    span = f"{df.index[0]:%Y-%m-%d} to {df.index[-1]:%Y-%m-%d}"
+    pages = build_pages(df.columns, dev=args.dev)
+    for i, page in enumerate(pages, 1):
+        fig = render_daily_profile(profile, page, title, span, clock)
+        fig.savefig(folder / f"{i:02d}_{page.name}.png", dpi=130)
+        plt.close(fig)
+    print(f"  daily profile ({clock}): {len(pages)} pages -> {folder}")
+
+
 def main(argv=None):
     args = parse_args(argv)
     by_run = group_runs(find_parquets(args.inputs))
@@ -162,6 +211,11 @@ def main(argv=None):
                  smooth=None if args.smooth.lower() == "none" else args.smooth,
                  line_mag=args.line_mag, line_dist_km=args.line_dist)
     suffix = "_dev" if args.dev else ""
+    if args.remove_daily:
+        suffix += "_nodaily"
+    elif args.night:
+        suffix += f"_night{args.night[0]:g}-{args.night[1]:g}"
+    daily = args.remove_daily or args.night or args.daily_profile
 
     for (station, band), parquets in by_run.items():
         print(f"{station}{f' {band}' if band else ''}: "
@@ -184,6 +238,27 @@ def main(argv=None):
         # once it leaves its folder.
         prefix = f"{station}_{band}" if band else station
         title = f"{station}  |  {band}" if band else station
+
+        if daily:
+            if args.utc_offset is not None:
+                offset, clock = args.utc_offset, f"UTC{args.utc_offset:+g}"
+            elif station in coords:
+                offset, clock = utc_offset_hours(coords[station][1]), "local solar time"
+            else:
+                offset, clock = 0.0, "UTC"
+                print(f"  [WARN] no coordinates for {station}; hours are UTC")
+            columns = feature_columns(df.columns, args.dev)
+            _draw_profile(df, columns, offset, clock, title, out, args)
+            if args.remove_daily:
+                df = remove_daily_cycle(df, columns, offset,
+                                        pd.Timedelta(days=args.era_gap_days))
+                title += "  |  daily cycle removed"
+            elif args.night:
+                df = in_hours(df, offset, *args.night)
+                title += f"  |  {args.night[0]:g}-{args.night[1]:g} h {clock}"
+                if df.empty:
+                    print("  [WARN] no windows in those hours; skipped")
+                    continue
         eras = split_eras(df, pd.Timedelta(days=args.era_gap_days))
 
         with contextlib.ExitStack() as stack:

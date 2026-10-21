@@ -270,3 +270,42 @@ def render_page(df: pd.DataFrame, page: Page, events: pd.DataFrame,
                  f"(window end time, UTC; {len(events)} events)",
                  fontsize=11, y=1 - 0.15 / fig.get_figheight(), va="top")
     return fig
+
+
+def render_daily_profile(profile: pd.DataFrame, page: Page, station: str,
+                         title_span: str, clock: str):
+    """Median and interquartile range of each feature on ``page`` by local
+    hour, laid out as the page is. ``profile`` comes from
+    ``features.daily_profile``."""
+    ncols, nrows = page.columns, len(page.rows)
+    fig = plt.figure(figsize=(4.2 * ncols if ncols > 1 else 9.0, 0.9 + 1.7 * nrows))
+    grid = fig.add_gridspec(nrows, ncols, hspace=0.15, wspace=0.22,
+                            left=0.1 if ncols > 1 else 0.12, right=0.97,
+                            top=1 - 0.6 / fig.get_figheight(),
+                            bottom=0.45 / fig.get_figheight())
+    hours = profile.index.to_numpy()
+    for r, (feature, cells) in enumerate(page.rows):
+        for c, column in enumerate(cells):
+            ax = fig.add_subplot(grid[r, c])
+            if column is not None and (column, 0.5) in profile:
+                ax.fill_between(hours, profile[(column, 0.25)], profile[(column, 0.75)],
+                                color=RAW_COLOR, lw=0, step="mid")
+                ax.step(hours, profile[(column, 0.5)], color=SMOOTH_COLOR, lw=1.2,
+                        where="mid")
+            else:
+                ax.text(0.5, 0.5, "no column", ha="center", va="center",
+                        transform=ax.transAxes, color="0.5", fontsize=8)
+            ax.set_xlim(-0.5, 23.5)
+            ax.set_xticks(range(0, 24, 3))
+            ax.grid(alpha=0.25, lw=0.5)
+            ax.tick_params(labelsize=7, labelbottom=(r == nrows - 1))
+            if r == 0 and ncols > 1:
+                ax.set_title(f"{'ENZ'[c]} component", fontsize=9)
+            if c == 0:
+                ax.set_ylabel(feature, fontsize=8)
+            if r == nrows - 1:
+                ax.set_xlabel(f"hour ({clock})", fontsize=8)
+    fig.suptitle(f"{station}  |  {page.name} by hour of day  |  {title_span}  "
+                 "(median and interquartile range)",
+                 fontsize=11, y=1 - 0.15 / fig.get_figheight(), va="top")
+    return fig

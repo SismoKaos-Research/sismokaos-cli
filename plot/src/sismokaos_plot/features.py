@@ -198,3 +198,61 @@ def break_gaps(series: pd.Series, max_step: pd.Timedelta):
     mid = t[gaps] + (t[gaps + 1] - t[gaps]) / 2
     return np.insert(t, gaps + 1, mid), np.insert(v, gaps + 1, np.nan)
 
+
+def utc_offset_hours(lon: float) -> float:
+    """Local mean solar time minus UTC at longitude ``lon``, in hours. Used
+    instead of a time zone, which for Turkey changed in 2016 and had DST
+    before."""
+    return lon / 15.0
+
+
+def local_hour(index: pd.DatetimeIndex, offset_h: float) -> np.ndarray:
+    """Hour of day, 0 to 24, of each (UTC) time at ``offset_h`` from UTC."""
+    h = index.hour + index.minute / 60.0 + index.second / 3600.0
+    return (np.asarray(h, dtype=float) + offset_h) % 24.0
+
+
+def _log_scaled(values: np.ndarray) -> bool:
+    """Whether a feature varies by factors rather than steps: all positive,
+    and spanning more than 100x (the plot's log-axis rule)."""
+    finite = values[np.isfinite(values)]
+    if not len(finite) or finite.min() <= 0:
+        return False
+    lo, hi = np.percentile(finite, (0.1, 99.9))
+    return hi / lo > 100.0
+
+
+def daily_profile(df: pd.DataFrame, columns, offset_h: float) -> pd.DataFrame:
+    """25th, 50th and 75th percentile of each column by local hour (0-23),
+    as a frame indexed by hour with (column, quantile) columns."""
+    hours = np.floor(local_hour(df.index, offset_h)).astype(int)
+    grouped = df[list(columns)].astype(float).groupby(hours)
+    return grouped.quantile([0.25, 0.5, 0.75]).unstack()
+
+
+def remove_daily_cycle(df: pd.DataFrame, columns, offset_h: float,
+                       max_gap: pd.Timedelta) -> pd.DataFrame:
+    """``df`` with each column's median by local hour taken out, era by era,
+    and the era's median added back so the level stays readable. Features
+    that vary by factors are adjusted by factors."""
+    eras = []
+    for era in split_eras(df, max_gap):
+        era = era.copy()
+        hours = np.floor(local_hour(era.index, offset_h)).astype(int)
+        for column in columns:
+            values = era[column].to_numpy(dtype=float)
+            log = _log_scaled(values)
+            work = pd.Series(np.log10(values) if log else values, index=era.index)
+            hourly = work.groupby(hours).transform("median")
+            fixed = (work - hourly + work.median()).to_numpy()
+            era[column] = 10.0 ** fixed if log else fixed
+        eras.append(era)
+    return pd.concat(eras) if eras else df
+
+
+def in_hours(df: pd.DataFrame, offset_h: float, start: float, end: float) -> pd.DataFrame:
+    """The windows ending between local hours ``start`` and ``end``; the span
+    wraps midnight when ``start > end`` (22-4 is 22:00 to 04:00)."""
+    h = local_hour(df.index, offset_h)
+    keep = (h >= start) & (h < end) if start <= end else (h >= start) | (h < end)
+    return df[keep]

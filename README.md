@@ -228,6 +228,15 @@ bands.
 uv run --project plot sismokaos-plot output/focus_chaos --out figs/focus --before-main 30 60
 ```
 
+Cultural noise gives many features a daily cycle that can hide slow trends:
+at TVAN, 1-5 Hz sample entropy doubles between 06:00 and 18:00.
+`--remove-daily` takes each feature's median by hour out of it (era by era,
+by factors for features spanning more than 100x), and `--night 22-4` keeps
+only windows ending in those hours. Hours are local mean solar time from the
+station's longitude, since Turkey's clock changed in 2016; `--utc-offset`
+overrides it. Either option, or `--daily-profile`, also draws every feature's
+median and interquartile range by hour into `daily_profile/`.
+
 ### Threshold crossings against the catalog
 
 `sismokaos-thresholds` puts lower and upper bounds at percentiles of each
