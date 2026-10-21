@@ -16,6 +16,10 @@ pub enum PipelineEvent {
     WindowProcessed,
     /// All windows have been written
     Completed,
+    /// A pass over the input begins; progress restarts from zero
+    Phase(String),
+    /// A line of information for the user
+    Info(String),
     /// Non-fatal error or warning during processing
     Warning(String),
     /// Pipeline finished completely

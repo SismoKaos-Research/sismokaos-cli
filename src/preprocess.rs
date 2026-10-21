@@ -1,4 +1,3 @@
-use butterworth::{Cutoff, Filter};
 use mseed::{MSControlFlags, MSRecord, MSSampleType, detect};
 use rayon::prelude::*;
 use std::cell::RefCell;
@@ -8,10 +7,19 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use crate::config::AppConfig;
+use crate::filter::{self, BandPass};
 
 const BLOCK_SECONDS: f64 = 3600.0;
 const WATERMARK_SECONDS: f64 = 60.0;
 const FILTER_CONTEXT_SECONDS: f64 = 120.0;
+
+/// Samples filtered on either side of each block and then discarded: past
+/// ones carried over from the previous block, future ones read ahead. At least
+/// `FILTER_CONTEXT_SECONDS`, and longer when a low corner makes the filter
+/// ring for longer than that.
+fn filter_context_seconds(freqmin: f64) -> f64 {
+    FILTER_CONTEXT_SECONDS.max(filter::settle_seconds(freqmin))
+}
 
 thread_local! {
     static SCRATCH_BUF: RefCell<Vec<f64>> = RefCell::new(Vec::with_capacity(3600 * 250));
@@ -182,7 +190,9 @@ pub fn preprocess_directory_chunked(
             .watermark
             .max(r.start_epoch + (count as f64 - 1.0) / native_fs);
 
-        while asm.watermark >= asm.start_epoch + BLOCK_SECONDS + WATERMARK_SECONDS {
+        // The wait also guarantees the block's future context has arrived.
+        let lag = WATERMARK_SECONDS.max(filter_context_seconds(config.freqmin));
+        while asm.watermark >= asm.start_epoch + BLOCK_SECONDS + lag {
             flush_block(
                 &mut asm,
                 block_len,
@@ -244,11 +254,12 @@ fn flush_block(
         .first()
         .map_or(0, |c| c.values().map(|v| v.len()).min().unwrap_or(0));
 
-    let context_len = ((FILTER_CONTEXT_SECONDS * asm.fs) as usize).min(take);
+    let context_len = (filter_context_seconds(config.freqmin) * asm.fs) as usize;
+    let carried = context_len.min(take);
     let mut next_context = HashMap::new();
     for comp in COMPONENTS {
         let v = asm.comps.get_mut(&comp).unwrap();
-        next_context.insert(comp, v[take - context_len..take].to_vec());
+        next_context.insert(comp, v[take - carried..take].to_vec());
     }
 
     let phase = (decimation_factor - (asm.global_offset % decimation_factor)) % decimation_factor;
@@ -265,8 +276,13 @@ fn flush_block(
                     combined.extend_from_slice(&ctx[ctx.len() - lead..]);
                 }
 
+                // Followed by what has already arrived of the next block, so
+                // the block's end is filtered with real data on both sides
+                // rather than a reflection of itself. Only the final block of
+                // a stretch has none.
                 let v = &asm.comps[&comp];
-                combined.extend_from_slice(&v[..take]);
+                let ahead = v.len().min(take + context_len);
+                combined.extend_from_slice(&v[..ahead]);
 
                 let processed = process_component(
                     &mut *combined,
@@ -275,6 +291,7 @@ fn flush_block(
                     asm.fs,
                     decimation_factor,
                     lead + phase,
+                    lead + take,
                 )?;
                 Ok((comp, processed))
             })
@@ -770,6 +787,10 @@ fn detrend_linear(data: &mut [f64]) {
 /// Returns the processed samples together with a per-sample flag marking which
 /// of them the gap interpolant fabricated. Both are decimated identically, so
 /// they stay index-aligned.
+///
+/// `data[..skip]` and `data[end..]` are filter context: processed, then
+/// dropped from the output.
+#[allow(clippy::too_many_arguments)]
 fn process_component(
     data: &mut Vec<f64>,
     freqmin: f64,
@@ -777,6 +798,7 @@ fn process_component(
     fs: f64,
     decimation_factor: usize,
     skip: usize,
+    end: usize,
 ) -> Result<(Vec<f64>, Vec<bool>), String> {
     if data.is_empty() {
         return Ok((Vec::new(), Vec::new()));
@@ -814,14 +836,17 @@ fn process_component(
         }
     }
 
+    let end = end.min(data.len());
     if missing.len() == data.len() {
-        let kept = data.len().saturating_sub(skip).div_ceil(decimation_factor);
+        let kept = end.saturating_sub(skip).div_ceil(decimation_factor);
         return Ok((vec![f64::NAN; kept], vec![false; kept]));
     }
 
-    let filter =
-        Filter::new(4, fs, Cutoff::BandPass(freqmin, freqmax)).map_err(|e| e.to_string())?;
-    let mut filtered = filter.bidirectional(data).map_err(|e| e.to_string())?;
+    // A block's end has no future context, so the reflected padding has to
+    // outlast the filter's ringing for that edge to come out clean.
+    let filter = BandPass::new(4, fs, freqmin, freqmax)?;
+    let padlen = (filter::settle_seconds(freqmin) * fs).ceil() as usize;
+    let mut filtered = filter.filtfilt(data, padlen);
 
     for i in missing {
         filtered[i] = f64::NAN;
@@ -835,13 +860,13 @@ fn process_component(
         interpolated.len(),
         "interpolation mask desynchronised from filtered samples"
     );
-    let skip = skip.min(filtered.len());
-    let out: Vec<f64> = filtered[skip..]
+    let skip = skip.min(end);
+    let out: Vec<f64> = filtered[skip..end]
         .iter()
         .step_by(decimation_factor)
         .copied()
         .collect();
-    let mask: Vec<bool> = interpolated[skip..]
+    let mask: Vec<bool> = interpolated[skip..end]
         .iter()
         .step_by(decimation_factor)
         .copied()
@@ -871,7 +896,7 @@ mod tests {
             *v = f64::NAN;
         }
 
-        let (out, mask) = process_component(&mut data, 1.0, 20.0, 100.0, 1, 0).unwrap();
+        let (out, mask) = process_component(&mut data, 1.0, 20.0, 100.0, 1, 0, usize::MAX).unwrap();
 
         assert_eq!(out.len(), mask.len());
         assert!(
@@ -897,7 +922,7 @@ mod tests {
             *v = f64::NAN;
         }
 
-        let (out, mask) = process_component(&mut data, 1.0, 20.0, 100.0, 1, 0).unwrap();
+        let (out, mask) = process_component(&mut data, 1.0, 20.0, 100.0, 1, 0, usize::MAX).unwrap();
 
         assert!(mask.iter().all(|&b| !b), "edge gaps are not interpolated");
         assert!(out[..5].iter().all(|v| v.is_nan()), "edge gaps stay NaN");
@@ -907,7 +932,7 @@ mod tests {
     #[test]
     fn clean_data_reports_no_interpolation() {
         let mut data = sine(1000, 100.0);
-        let (out, mask) = process_component(&mut data, 1.0, 20.0, 100.0, 1, 0).unwrap();
+        let (out, mask) = process_component(&mut data, 1.0, 20.0, 100.0, 1, 0, usize::MAX).unwrap();
         assert_eq!(out.len(), mask.len());
         assert!(mask.iter().all(|&b| !b));
     }
@@ -922,7 +947,7 @@ mod tests {
             for v in data.iter_mut().take(520).skip(500) {
                 *v = f64::NAN;
             }
-            let (out, mask) = process_component(&mut data, 1.0, 20.0, 100.0, factor, skip).unwrap();
+            let (out, mask) = process_component(&mut data, 1.0, 20.0, 100.0, factor, skip, usize::MAX).unwrap();
 
             assert_eq!(out.len(), mask.len(), "factor={factor} skip={skip}");
             // Every flagged output index must map back into the original gap.
@@ -1023,5 +1048,31 @@ mod tests {
                 .filter(|v| v.is_finite())
                 .all(|v| v.abs() < 1e-6)
         );
+    }
+
+    /// The end of a block is filtered with the next block's samples as
+    /// context, so it should match filtering the whole signal at once. With
+    /// only a reflection of itself to go on, this 0.02 Hz case is still off by
+    /// 0.4 (on an amplitude of 1.5) a minute before the edge.
+    #[test]
+    fn lookahead_makes_block_ends_match_continuous_filtering() {
+        let fs = 100.0;
+        let signal: Vec<f64> = (0..200_000)
+            .map(|i| {
+                let t = i as f64 / fs;
+                (2.0 * std::f64::consts::PI * 0.05 * t).sin()
+                    + 0.5 * (2.0 * std::f64::consts::PI * 0.031 * t + 1.0).sin()
+            })
+            .collect();
+        let whole = process_component(&mut signal.clone(), 0.02, 0.1, fs, 1, 0, usize::MAX).unwrap().0;
+
+        let cut = 150_000;
+        let ahead = (filter_context_seconds(0.02) * fs) as usize;
+        let mut block = signal[..cut + ahead].to_vec();
+        let part = process_component(&mut block, 0.02, 0.1, fs, 1, 0, cut).unwrap().0;
+        assert_eq!(part.len(), cut);
+
+        let err = (cut - 6000..cut).map(|i| (part[i] - whole[i]).abs()).fold(0.0, f64::max);
+        assert!(err < 0.02, "block-end error {err}");
     }
 }

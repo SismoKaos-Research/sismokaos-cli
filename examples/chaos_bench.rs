@@ -31,9 +31,12 @@ fn main() {
     };
 
     let mut total = 0.0;
-    total += bench("wolf_lye", &|| chaos::wolf_lye(&x, 5.0, 5, 5, 5));
-    total += bench("rosenstein_lye", &|| chaos::rosenstein_lye(&x, 5.0, 5, 5, [0.5, 5.0, 5.0, 20.0], 1.0).0);
+    total += bench("wolf_lye", &|| chaos::wolf_lye(&x, 20.0, 2, 4, 5));
+    total += bench("rosenstein_lye", &|| chaos::rosenstein_lye(&x, 20.0, 2, 4, 0.333, 20.0, [0.1, 0.9]).0);
     total += bench("sample_entropy", &|| chaos::sample_entropy(&x, 2, 0.2));
-    total += bench("correlation_dimension", &|| chaos::correlation_dimension(&x, 5, 5));
+    total += bench("correlation_dimension", &|| chaos::correlation_dimension(&x, 2, 4));
+    // Calibration only: once per run, on a few hundred quiet windows.
+    bench("ami_tau", &|| chaos::ami_tau(&x, 20).unwrap_or(0) as f64);
+    bench("fnn_dim (tau 5)", &|| chaos::fnn_dim(&x, 5, 10).unwrap_or(0) as f64);
     println!("  {:<22} {:8.3} ms/call  x3 components = {:.1} ms/window", "TOTAL", total, total * 3.0);
 }

@@ -3,13 +3,14 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc::{Sender, sync_channel};
 use std::thread;
 
+use crate::calibrate::{self, Calibration};
 use crate::config::AppConfig;
 use crate::export::FeatureWriter;
 use crate::features::compute_window;
 use crate::preprocess::{self, ChannelChunk};
 use crate::types::PipelineEvent;
 
-pub fn run_pipeline(config: AppConfig, progress_tx: Sender<PipelineEvent>) -> Result<(), String> {
+pub fn run_pipeline(mut config: AppConfig, progress_tx: Sender<PipelineEvent>) -> Result<(), String> {
     if !config.data_dir.exists() {
         return Err(format!("Data directory not found: {:?}", config.data_dir));
     }
@@ -23,9 +24,46 @@ pub fn run_pipeline(config: AppConfig, progress_tx: Sender<PipelineEvent>) -> Re
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "output".to_string());
+    // Chaos-only output gets its own name, so it never overwrites a full run
+    // written to the same directory.
+    let suffix = if config.chaos_only { "chaos_features" } else { "features" };
     let parquet_path = config
         .output_root
-        .join(format!("{}_features.parquet", file_stem));
+        .join(format!("{}_{}.parquet", file_stem, suffix));
+
+    // The chaos parameters are fixed before any window is measured, so every
+    // window of the run shares them.
+    let calibration = match &config.calibration_file {
+        Some(path) => {
+            let cal = Calibration::load(path)?;
+            if (cal.fs - config.fs).abs() > 1e-9 {
+                return Err(format!(
+                    "{:?} was calibrated at {} Hz but this run is at {} Hz; its tau is in \
+                     samples of the other rate",
+                    path, cal.fs, config.fs
+                ));
+            }
+            let _ = progress_tx.send(PipelineEvent::Info(format!(
+                " Chaos parameters from {:?} (station {})",
+                path, cal.station
+            )));
+            cal
+        }
+        None => {
+            let _ = progress_tx.send(PipelineEvent::Phase(
+                "Calibrating chaos parameters on quiet periods".to_string(),
+            ));
+            calibrate::calibrate(&config, &progress_tx)?
+        }
+    };
+    for line in calibration.describe() {
+        let _ = progress_tx.send(PipelineEvent::Info(line));
+    }
+    calibration.apply(&mut config);
+    std::fs::create_dir_all(&config.output_root)
+        .map_err(|e| format!("Failed to create {:?}: {}", config.output_root, e))?;
+    calibration.save(&config.output_root.join(format!("{}_calibration.json", file_stem)))?;
+    let _ = progress_tx.send(PipelineEvent::Phase("Extracting features".to_string()));
 
     let (chunk_tx, chunk_rx) = sync_channel::<ChannelChunk>(2);
 
@@ -204,3 +242,4 @@ pub fn run_pipeline(config: AppConfig, progress_tx: Sender<PipelineEvent>) -> Re
     let _ = progress_tx.send(PipelineEvent::Finished);
     Ok(())
 }
+

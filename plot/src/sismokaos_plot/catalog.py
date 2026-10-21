@@ -1,6 +1,6 @@
 """Earthquake catalog and station coordinates.
 
-Both are the AFAD exports under ``data_downloader/catalogs``. The catalog's
+Both are the AFAD exports copied into the repo's ``catalogs/``. The catalog's
 ``Date`` is day-first and already UTC: it lists the 2011 Van main shock at
 23/10/2011 10:41:20, the international UTC origin time.
 """

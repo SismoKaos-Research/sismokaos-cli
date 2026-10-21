@@ -1,0 +1,25 @@
+{
+  "station": "BODT",
+  "fs": 5.0,
+  "win_sec": 200,
+  "step_sec": 50,
+  "sta_sec": 0.5,
+  "lta_sec": 60,
+  "freqmin": 0.1,
+  "freqmax": 2.0,
+  "chaos_tau": 5,
+  "chaos_dim": 5,
+  "chaos_evolve": 5,
+  "chaos_min_samples": 500,
+  "chaos_mean_period": 1.0,
+  "chaos_ros_rise": [0.1, 0.9],
+  "chaos_ros_horizon": 20.0,
+  "chaos_sampent_m": 2,
+  "chaos_sampent_r": 0.2,
+  "bands": [
+    {"name": "0.02-0.1Hz", "freqmin": 0.02, "freqmax": 0.1, "fs": 0.5,  "win_sec": 2000, "step_sec": 500, "sta_sec": 60.0, "lta_sec": 600},
+    {"name": "0.1-1Hz",    "freqmin": 0.1,  "freqmax": 1.0, "fs": 2.5,  "win_sec": 400,  "step_sec": 100, "sta_sec": 5.0,  "lta_sec": 100},
+    {"name": "1-5Hz",      "freqmin": 1.0,  "freqmax": 5.0, "fs": 25.0, "win_sec": 40,   "step_sec": 50,  "sta_sec": 1.0,  "lta_sec": 20},
+    {"name": "5-20Hz",     "freqmin": 5.0,  "freqmax": 20.0, "fs": 50.0, "win_sec": 20,  "step_sec": 50,  "sta_sec": 0.2,  "lta_sec": 8}
+  ]
+}

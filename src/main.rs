@@ -1,8 +1,13 @@
+mod calibrate;
+mod catalog;
 mod cli;
+#[cfg(test)]
+mod cli_tests;
 mod config;
 mod engine;
 mod export;
 mod features;
+mod filter;
 mod preprocess;
 mod preprocess_only;
 mod raw_binary;
@@ -72,6 +77,15 @@ impl Progress {
         }
     }
 
+    /// Starts the bar over for another pass over the input.
+    fn restart(&mut self) {
+        if self.started {
+            self.bar.reset();
+            self.started = false;
+            self.next_log_pct = 5;
+        }
+    }
+
     fn message(&self, msg: String) {
         self.bar.set_message(msg);
     }
@@ -105,10 +119,26 @@ fn main() {
             let mut app_config = AppConfig::from_json(&cli.config);
             app_config.merge_with_cli(&cli);
 
+            let runs = match app_config.band_runs() {
+                Ok(runs) => runs,
+                Err(e) => {
+                    eprintln!("[ERROR] {}", e);
+                    std::process::exit(2);
+                }
+            };
+
             // Checked before any work starts. These are combinations whose
             // damage is invisible in the output, so failing late would mean
-            // shipping a corrupt dataset that looks perfectly fine.
-            let problems = app_config.validate();
+            // shipping a corrupt dataset that looks perfectly fine. Every
+            // band is checked up front, so a bad last band cannot fail a run
+            // hours in.
+            let mut problems = app_config.validate();
+            if !app_config.bands.is_empty() {
+                for run in &runs {
+                    let label = run.band.as_deref().unwrap_or_default();
+                    problems.extend(run.validate().into_iter().map(|p| format!("band {}: {}", label, p)));
+                }
+            }
             if !problems.is_empty() {
                 eprintln!("[ERROR] Invalid configuration:");
                 for p in &problems {
@@ -118,6 +148,18 @@ fn main() {
             }
 
             if *dry_run {
+                for run in runs.iter().filter(|r| r.band.is_some()) {
+                    println!(
+                        " band {:<14} {}-{} Hz at {} Hz, {} s windows every {} s -> {:?}",
+                        run.band.as_deref().unwrap_or_default(),
+                        run.freqmin,
+                        run.freqmax,
+                        run.fs,
+                        run.win_sec,
+                        run.step_sec,
+                        run.output_root
+                    );
+                }
                 println!("[DRY RUN ENABLED] Exiting without processing.");
                 return;
             }
@@ -125,20 +167,36 @@ fn main() {
             println!("=== STARTING PIPELINE ===");
 
             let (tx, rx) = mpsc::channel();
-            let engine_config = app_config.clone();
-
             let run_preprocess = matches!(&cli.command, Commands::Preprocess { .. });
 
+            // Bands run one after another; one failing does not stop the rest.
             let engine_handle = thread::spawn(move || {
-                let result = if run_preprocess {
-                    preprocess_only::run_preprocess_only(engine_config, tx)
-                } else {
-                    engine::run_pipeline(engine_config, tx)
-                };
-
-                if let Err(e) = result {
-                    eprintln!("Pipeline Error: {}", e);
+                let total = runs.len();
+                let mut outcomes = Vec::new();
+                for (i, run) in runs.into_iter().enumerate() {
+                    let label = run.band.clone();
+                    if let Some(label) = &label {
+                        let _ = tx.send(PipelineEvent::Info(format!(
+                            "=== Band {} ({}/{}): {}-{} Hz at {} Hz ===",
+                            label,
+                            i + 1,
+                            total,
+                            run.freqmin,
+                            run.freqmax,
+                            run.fs
+                        )));
+                    }
+                    let result = if run_preprocess {
+                        preprocess_only::run_preprocess_only(run, tx.clone())
+                    } else {
+                        engine::run_pipeline(run, tx.clone())
+                    };
+                    if let Err(e) = &result {
+                        let _ = tx.send(PipelineEvent::Warning(format!("Pipeline Error: {}", e)));
+                    }
+                    outcomes.push((label, result));
                 }
+                outcomes
             });
 
             let mut progress = Progress::new();
@@ -170,19 +228,39 @@ fn main() {
                         } else {
                             println!(" Windows processed: {}", windows);
                         }
+                        windows = 0;
+                        samples = 0;
+                        progress = Progress::new();
+                    }
+                    PipelineEvent::Phase(name) => {
+                        progress.restart();
+                        progress.say(format!(" {}", name));
+                    }
+                    PipelineEvent::Info(line) => {
+                        progress.say(line);
                     }
                     PipelineEvent::Warning(msg) => {
                         progress.say(format!(" Warning: {}", msg));
                     }
                     PipelineEvent::Finished => {
                         progress.finish();
-                        println!("All processing finished successfully");
                     }
                 }
             }
             progress.finish();
 
-            let _ = engine_handle.join();
+            let outcomes = engine_handle.join().unwrap_or_default();
+            let failed: Vec<String> = outcomes
+                .iter()
+                .filter(|(_, r)| r.is_err())
+                .map(|(label, _)| label.clone().unwrap_or_else(|| "run".to_string()))
+                .collect();
+            if failed.is_empty() {
+                println!("All processing finished successfully");
+            } else {
+                eprintln!("[ERROR] Failed: {}", failed.join(", "));
+                std::process::exit(1);
+            }
         }
     }
 }

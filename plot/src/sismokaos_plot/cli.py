@@ -31,10 +31,10 @@ from .catalog import events_near, load_catalog, load_station_coords
 from .features import build_pages, load_station, split_eras, station_of
 from .render import Style, pick_main, render_page, render_single
 
-# plot/src/sismokaos_plot/cli.py -> the directory holding the sibling repos.
-_PROJECTS = Path(__file__).resolve().parents[4]
-DEFAULT_CATALOG = _PROJECTS / "data_downloader/catalogs/catalog_current.csv"
-DEFAULT_STATIONS = _PROJECTS / "data_downloader/catalogs/istasyon_katalog.csv"
+# plot/src/sismokaos_plot/cli.py -> the repo's own copy of the AFAD exports.
+_CATALOGS = Path(__file__).resolve().parents[3] / "catalogs"
+DEFAULT_CATALOG = _CATALOGS / "catalog_afad_2026-08-30.csv.gz"
+DEFAULT_STATIONS = _CATALOGS / "istasyon_katalog.csv"
 
 
 def find_parquets(paths: list[Path]) -> list[Path]:

@@ -8,6 +8,11 @@ Sismokaos CLI is a command-line interface tool for preprocessing and feature ext
   are read too: their members are inflated to `<out-dir>/.unzipped-<pid>/` for
   the run and deleted afterwards, so expect that much free disk.
 - Stream-safe preprocessing pipeline (gap fill, detrend, bandpass, decimation).
+- Chaotic features (Wolf/Rosenstein Lyapunov exponents, Sample Entropy,
+  Correlation Dimension) with parameters calibrated once per run on
+  seismically quiet periods (see **Chaotic features** below).
+- Several frequency bands per run, each with its own rate, windows and
+  calibration (see **Frequency bands**).
 - Full feature extraction pipeline (`run`) producing per-window engineered features.
 - Preprocess-only pipeline (`preprocess`) producing filtered/decimated component streams without feature extraction.
 - Configurable processing parameters via JSON config and CLI overrides.
@@ -51,6 +56,100 @@ zero-fill is left to the consumer.
 The feature table is small, heterogeneous and read whole, which is what Parquet
 is for. It keeps `<name>` and `<name>_DEV` columns; the `_DEV` columns are
 first differences, and the models consume them as features.
+
+## Chaotic features
+
+### Parameters are calibrated on quiet periods
+
+The embedding delay `tau`, embedding dimension `dim`, Rosenstein mean period
+and Sample Entropy tolerance are estimated once, before any window is
+measured, and held fixed for the whole run. Estimating them per window would
+let them change across an earthquake along with the features they set, which
+makes windows incomparable.
+
+1. Every event in the catalog within `max_dist_km` of the station, at or
+   above `min_mag`, excludes `pre_sec` before its origin time to a
+   magnitude-dependent coda after it. Gap-free windows touching no exclusion
+   are quiet.
+2. A first pass over the data reservoir-samples `max_windows` quiet windows
+   from the whole run (seeded), and drops any louder than `loud_factor` times
+   its component's median, since the catalog misses teleseisms and glitches.
+3. Per window and component: `tau` is the first minimum of the average mutual
+   information, the mean period is the reciprocal of the power-weighted mean
+   frequency, and `dim` comes from False Nearest Neighbours at that `tau`.
+   The run uses the medians. SampEn's tolerance becomes absolute:
+   `chaos_sampent_r` times each component's median quiet std, so a louder
+   window is not rescaled to look like a quiet one.
+
+The result goes to `<stem>_calibration.json` next to the features, and the
+values into `run_metadata.json`. `--calibration FILE` reuses one, for example
+to measure another station with the same parameters. The catalog settings are
+in the `chaos_calibration` block of the config (defaults: M>=0, 300 km, 300
+windows); `--catalog` and `--station-coords` override the files.
+
+The values `chaos_tau`, `chaos_dim` and `chaos_mean_period` in a config file
+are overwritten by the calibration.
+
+### Rosenstein fit range per window
+
+Each window's mean log-divergence curve is followed for `chaos_ros_horizon`
+mean periods (default 20). `ROS_SHORT` is the slope between the first steps
+reaching 10% and 90% of the curve's rise from its first step to its peak
+(`chaos_ros_rise`); `ROS_LONG` is the slope from that 90% step to the end,
+over the saturation. Neighbours closer in time than one mean period (or the
+embedding span, if longer) are excluded. Both are per mean period.
+
+### Chaos only
+
+`run --chaos-only` computes just the five chaotic features per component and
+writes `<stem>_chaos_features.parquet`, so it never overwrites a full run in
+the same directory. The plotter picks it up like any `*_features.parquet`;
+keep chaos-only and full runs in separate directories, or a station's windows
+are loaded twice.
+
+## Frequency bands
+
+A `bands` list in the config runs the pipeline once per band, each with its
+own filter, output rate, windows, STA/LTA lengths and calibration, into
+`<out-dir>/<band name>/`. `config_bands.json` defines four:
+
+| Band | fs | Window / step | Dominated by |
+|---|---|---|---|
+| `0.02-0.1Hz` | 0.5 Hz | 2000 s / 500 s | primary microseism, tilt, pressure |
+| `0.1-1Hz` | 2.5 Hz | 400 s / 100 s | secondary (ocean) microseism: the control band |
+| `1-5Hz` | 25 Hz | 40 s / 50 s | local microseismicity, tremor, cultural noise |
+| `5-20Hz` | 50 Hz | 20 s / 50 s | near-field microcracking, cultural noise |
+
+Every window holds 1000 samples, and every rate is 2.5-5x the band's upper
+edge, so the estimators see similar inputs in every band. Every rate divides
+both 100 Hz (HH) and 50 Hz (BH), so the same list serves either kind of
+archive. Steps keep each band near the default run's window count; the 1-5 and
+5-20 Hz bands sample 40 s and 20 s of every 50 s.
+
+```bash
+sismokaos-cli --config config_bands.json run --data-dir ./data --out-dir ./output/elba
+sismokaos-cli --config config_bands.json run --data-dir ./data --out-dir ./output/elba \
+    --band 1-5Hz --band 5-20Hz --chaos-only
+```
+
+A band's `name` defaults to `<freqmin>-<freqmax>Hz`, and its
+`spectral_split_hz` (the LOW/HIGH_FREQ_ENERGY boundary, 1 Hz for single-band
+runs) to the band's geometric centre. `--fs`, `--freqmin`, `--freqmax` and
+`--win-sec` are rejected alongside a band list, and every band is validated
+before any work starts. A band that fails does not stop the others; the exit
+code is 1 if any did.
+
+## Filtering
+
+The bandpass is an order-4 Butterworth (order 8 as a bandpass) applied forward
+and backward, built as second-order sections. The `butterworth` crate it
+replaced built one transfer-function polynomial, which lost accuracy at low
+corners: at 100 Hz a 0.02-0.1 Hz band went unstable, 0.1-1 Hz came out 4% hot
+at band centre, and 0.1-2 Hz 0.2%. Data are filtered in hour-long blocks, each
+with `max(120 s, 5 / freqmin)` of real data on both sides that is filtered and
+then dropped; before, the end of every block had no future context and was
+distorted for about the filter's ringing time. Both changes alter output
+slightly against runs made before them.
 
 ## Guards
 
@@ -137,6 +236,21 @@ uv run --project plot sismokaos-threshold-figs figs/van/thresholds --data output
 uv run --project plot sismokaos-threshold-raw output/van --out figs/van/thresholds/raw
 ```
 
-The catalog and station list default to `../data_downloader/catalogs/`;
-see `sismokaos-plot --help` for the event radius, line thresholds and output
+The catalog and station list default to the copies in `catalogs/`; see
+`sismokaos-plot --help` for the event radius, line thresholds and output
 options.
+
+## Catalog
+
+`catalogs/` holds the AFAD event catalog (gzipped; the CLI and the plotter
+both read it compressed) and AFAD station list, copied from
+`data_downloader/catalogs/` so the project runs on its own. To refresh, export
+a new catalog there and copy it in under a new dated name:
+
+```bash
+gzip -9 -c ../data_downloader/catalogs/catalog_afad_full_<date>.csv \
+    > catalogs/catalog_afad_<date>.csv.gz
+```
+
+then point the defaults at it (`CalibrationConfig::default` in
+`src/config.rs`, `DEFAULT_CATALOG` in `plot/src/sismokaos_plot/cli.py`).

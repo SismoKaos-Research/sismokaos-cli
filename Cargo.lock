@@ -248,16 +248,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 
 [[package]]
-name = "butterworth"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5cbbb7f9bd55fef9fa04d086be27982f056e66a5bef324082bc38a0e634cc641"
-dependencies = [
- "num-complex",
- "num-traits",
-]
-
-[[package]]
 name = "bytemuck"
 version = "1.25.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2156,9 +2146,9 @@ checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
 name = "sismokaos-cli"
 version = "0.1.0"
 dependencies = [
- "butterworth",
  "clap",
  "csv",
+ "flate2",
  "indicatif",
  "itoa",
  "mimalloc",

@@ -14,8 +14,11 @@ fn default_chaos_evolve() -> usize {
 fn default_chaos_min_samples() -> usize {
     500
 }
-fn default_chaos_slope_ros() -> [f64; 4] {
-    [0.5, 5.0, 5.0, 20.0]
+fn default_chaos_ros_rise() -> [f64; 2] {
+    [0.1, 0.9]
+}
+fn default_chaos_ros_horizon() -> f64 {
+    20.0
 }
 fn default_chaos_mean_period() -> f64 {
     1.0
@@ -25,6 +28,96 @@ fn default_chaos_sampent_m() -> usize {
 }
 fn default_chaos_sampent_r() -> f64 {
     0.2
+}
+
+/// Where quiet periods come from and how the chaos parameters are estimated
+/// on them. See src/calibrate.rs.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(default)]
+pub struct CalibrationConfig {
+    /// AFAD catalog CSV, optionally gzipped. Relative paths are taken from the
+    /// working directory.
+    pub catalog: PathBuf,
+    /// Station list with code/latitude/longitude columns.
+    pub station_coords: PathBuf,
+    /// Overrides the station list, for codes it lacks or lists twice.
+    pub station_lat: Option<f64>,
+    pub station_lon: Option<f64>,
+    /// Events below this magnitude or farther than this are ignored.
+    pub min_mag: f64,
+    pub max_dist_km: f64,
+    /// Seconds excluded before each origin time.
+    pub pre_sec: f64,
+    /// Seconds excluded after it: the larger of `min_post_sec` and
+    /// `coda_factor` times the magnitude's coda duration.
+    pub min_post_sec: f64,
+    pub coda_factor: f64,
+    /// Quiet windows sampled from the whole run.
+    pub max_windows: usize,
+    /// A sampled window louder than this times the median std of its
+    /// component is an uncatalogued event or a glitch, not background.
+    pub loud_factor: f64,
+    pub seed: u64,
+    /// Search limits for tau (AMI lags, in samples) and dim (FNN).
+    pub max_tau: usize,
+    pub max_dim: usize,
+}
+
+impl Default for CalibrationConfig {
+    fn default() -> Self {
+        // The repo carries its own catalog, so a binary built from it finds
+        // one wherever it is run from.
+        let catalogs = Path::new(env!("CARGO_MANIFEST_DIR")).join("catalogs");
+        Self {
+            catalog: catalogs.join("catalog_afad_2026-08-30.csv.gz"),
+            station_coords: catalogs.join("istasyon_katalog.csv"),
+            station_lat: None,
+            station_lon: None,
+            min_mag: 0.0,
+            max_dist_km: 300.0,
+            pre_sec: 120.0,
+            min_post_sec: 300.0,
+            coda_factor: 3.0,
+            max_windows: 300,
+            loud_factor: 3.0,
+            seed: 0,
+            max_tau: 20,
+            max_dim: 10,
+        }
+    }
+}
+
+fn default_spectral_split_hz() -> f64 {
+    1.0
+}
+
+/// One frequency band to extract features from. Each band is a run of its
+/// own: preprocessed, calibrated and windowed with these settings, written to
+/// `<out-dir>/<label>/`.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct Band {
+    /// Defaults to `"<freqmin>-<freqmax>Hz"`.
+    #[serde(default)]
+    pub name: Option<String>,
+    pub freqmin: f64,
+    pub freqmax: f64,
+    pub fs: f64,
+    pub win_sec: u32,
+    pub step_sec: u32,
+    pub sta_sec: f64,
+    pub lta_sec: u32,
+    /// Split between the low- and high-frequency energy features; defaults to
+    /// the band's geometric centre.
+    #[serde(default)]
+    pub spectral_split_hz: Option<f64>,
+}
+
+impl Band {
+    pub fn label(&self) -> String {
+        self.name
+            .clone()
+            .unwrap_or_else(|| format!("{}-{}Hz", self.freqmin, self.freqmax))
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -50,14 +143,46 @@ pub struct AppConfig {
     pub chaos_evolve: usize,
     #[serde(default = "default_chaos_min_samples")]
     pub chaos_min_samples: usize,
-    #[serde(default = "default_chaos_slope_ros")]
-    pub chaos_slope_ros: [f64; 4],
     #[serde(default = "default_chaos_mean_period")]
     pub chaos_mean_period: f64,
+    /// Rosenstein fit range, as fractions of each window's divergence-curve
+    /// rise from its first step to its peak.
+    #[serde(default = "default_chaos_ros_rise")]
+    pub chaos_ros_rise: [f64; 2],
+    /// How far the divergence curve is followed, in mean periods.
+    #[serde(default = "default_chaos_ros_horizon")]
+    pub chaos_ros_horizon: f64,
     #[serde(default = "default_chaos_sampent_m")]
     pub chaos_sampent_m: usize,
     #[serde(default = "default_chaos_sampent_r")]
     pub chaos_sampent_r: f64,
+    /// Absolute Sample Entropy tolerance per component (E, N, Z):
+    /// `chaos_sampent_r` times the quiet-period std. `None` falls back to `r`
+    /// times each window's own std.
+    #[serde(default)]
+    pub chaos_sampent_tol: Option<[f64; 3]>,
+
+    // `chaos_tau`, `chaos_dim`, `chaos_mean_period` and `chaos_sampent_tol`
+    // are overwritten by the calibration on quiet periods before a run.
+    #[serde(default)]
+    pub chaos_calibration: CalibrationConfig,
+
+    /// Compute only the chaotic features.
+    #[serde(default)]
+    pub chaos_only: bool,
+
+    /// Split between the LOW_FREQ_ENERGY and HIGH_FREQ_ENERGY features, Hz.
+    #[serde(default = "default_spectral_split_hz")]
+    pub spectral_split_hz: f64,
+
+    /// Frequency bands to run one after another, each overriding the rate,
+    /// filter, window and STA/LTA settings above. Empty runs the settings
+    /// above as a single band.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bands: Vec<Band>,
+    /// The band a run is for, recorded in its metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub band: Option<String>,
 
     // Derived fields (calculated after loading, so we skip them during JSON parsing)
     #[serde(skip)]
@@ -68,6 +193,16 @@ pub struct AppConfig {
     pub win_size: usize,
     #[serde(skip)]
     pub step_size: usize,
+    /// A previous run's calibration to reuse instead of estimating one.
+    #[serde(skip)]
+    pub calibration_file: Option<PathBuf>,
+    /// `--band` selections; empty runs every band.
+    #[serde(skip)]
+    pub band_filter: Vec<String>,
+    /// Single-band settings given on the command line, which a band list
+    /// would silently override.
+    #[serde(skip)]
+    pub cli_band_overrides: Vec<&'static str>,
 }
 
 impl Default for AppConfig {
@@ -85,14 +220,24 @@ impl Default for AppConfig {
             chaos_dim: default_chaos_dim(),
             chaos_evolve: default_chaos_evolve(),
             chaos_min_samples: default_chaos_min_samples(),
-            chaos_slope_ros: default_chaos_slope_ros(),
             chaos_mean_period: default_chaos_mean_period(),
+            chaos_ros_rise: default_chaos_ros_rise(),
+            chaos_ros_horizon: default_chaos_ros_horizon(),
             chaos_sampent_m: default_chaos_sampent_m(),
             chaos_sampent_r: default_chaos_sampent_r(),
+            chaos_sampent_tol: None,
+            chaos_calibration: CalibrationConfig::default(),
+            chaos_only: false,
+            spectral_split_hz: default_spectral_split_hz(),
+            bands: Vec::new(),
+            band: None,
             data_dir: PathBuf::new(),
             output_root: PathBuf::new(),
             win_size: 0,
             step_size: 0,
+            calibration_file: None,
+            band_filter: Vec::new(),
+            cli_band_overrides: Vec::new(),
         }
     }
 }
@@ -126,10 +271,34 @@ impl AppConfig {
                 fs,
                 freqmin,
                 freqmax,
+                chaos_only,
+                catalog,
+                station_coords,
+                calibration,
+                band,
                 ..
             } => {
+                self.band_filter = band.clone();
+                for (flag, given) in [
+                    ("--win-sec", win_sec.is_some()),
+                    ("--fs", fs.is_some()),
+                    ("--freqmin", freqmin.is_some()),
+                    ("--freqmax", freqmax.is_some()),
+                ] {
+                    if given {
+                        self.cli_band_overrides.push(flag);
+                    }
+                }
                 self.data_dir = data_dir.clone();
                 self.output_root = out_dir.clone();
+                self.chaos_only |= *chaos_only;
+                self.calibration_file = calibration.clone();
+                if let Some(c) = catalog {
+                    self.chaos_calibration.catalog = c.clone();
+                }
+                if let Some(c) = station_coords {
+                    self.chaos_calibration.station_coords = c.clone();
+                }
 
                 if let Some(s) = station {
                     self.station = s.clone();
@@ -172,6 +341,45 @@ impl AppConfig {
         }
 
         self.finalize_derived_fields();
+    }
+
+    /// The configurations to run: one per selected band, or this one alone
+    /// when there are no bands. Each band writes to its own subdirectory.
+    pub fn band_runs(&self) -> Result<Vec<AppConfig>, String> {
+        if self.bands.is_empty() {
+            if !self.band_filter.is_empty() {
+                return Err("--band given, but the config defines no bands".to_string());
+            }
+            return Ok(vec![self.clone()]);
+        }
+        let labels: Vec<String> = self.bands.iter().map(Band::label).collect();
+        if let Some(unknown) = self.band_filter.iter().find(|b| !labels.contains(b)) {
+            return Err(format!("no band named {:?}; the config defines {:?}", unknown, labels));
+        }
+        Ok(self
+            .bands
+            .iter()
+            .zip(labels)
+            .filter(|(_, label)| self.band_filter.is_empty() || self.band_filter.contains(label))
+            .map(|(band, label)| {
+                let mut c = self.clone();
+                c.bands = Vec::new();
+                c.freqmin = band.freqmin;
+                c.freqmax = band.freqmax;
+                c.fs = band.fs;
+                c.win_sec = band.win_sec;
+                c.step_sec = band.step_sec;
+                c.sta_sec = band.sta_sec;
+                c.lta_sec = band.lta_sec;
+                c.spectral_split_hz = band
+                    .spectral_split_hz
+                    .unwrap_or((band.freqmin * band.freqmax).sqrt());
+                c.output_root = self.output_root.join(&label);
+                c.band = Some(label);
+                c.finalize_derived_fields();
+                c
+            })
+            .collect())
     }
 
     fn finalize_derived_fields(&mut self) {
@@ -221,6 +429,46 @@ impl AppConfig {
 
         if self.win_sec == 0 || self.step_sec == 0 {
             problems.push("win_sec and step_sec must both be non-zero".to_string());
+        }
+
+        if !self.bands.is_empty() && !self.cli_band_overrides.is_empty() {
+            problems.push(format!(
+                "{} cannot be combined with the config's band list; edit the bands instead",
+                self.cli_band_overrides.join(", ")
+            ));
+        }
+        if self.calibration_file.is_some() && self.bands.len() > 1 && self.band_filter.len() != 1 {
+            problems.push(
+                "--calibration holds one band's parameters; pick that band with --band".to_string(),
+            );
+        }
+        let mut labels: Vec<String> = self.bands.iter().map(Band::label).collect();
+        labels.sort();
+        if labels.windows(2).any(|w| w[0] == w[1]) {
+            problems.push(format!("band names must be unique, got {:?}", labels));
+        }
+        let nsta = (self.sta_sec * self.fs) as usize;
+        let nlta = (self.lta_sec as f64 * self.fs) as usize;
+        if !self.chaos_only && (nsta == 0 || nlta >= self.win_size) {
+            eprintln!(
+                "[WARNING] STA/LTA needs 0 < sta_sec*fs and lta_sec*fs < win_size; got \
+                 {} and {} samples against {}, so the STA_LTA features will be NaN.",
+                nsta, nlta, self.win_size
+            );
+        }
+
+        let [lo, hi] = self.chaos_ros_rise;
+        if !(0.0 <= lo && lo < hi && hi <= 1.0) {
+            problems.push(format!(
+                "chaos_ros_rise must satisfy 0 <= lo < hi <= 1, got [{}, {}]",
+                lo, hi
+            ));
+        }
+        if self.chaos_ros_horizon <= 0.0 {
+            problems.push(format!(
+                "chaos_ros_horizon must be positive, got {}",
+                self.chaos_ros_horizon
+            ));
         }
 
         problems

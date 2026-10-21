@@ -45,6 +45,27 @@ pub enum Commands {
         #[arg(long)]
         freqmax: Option<f64>,
 
+        /// Compute only the chaotic features (Wolf/Rosenstein LyE, SampEn, CorrDim)
+        #[arg(long, default_value_t = false)]
+        chaos_only: bool,
+
+        /// Earthquake catalog CSV (or .csv.gz) used to find quiet periods
+        #[arg(long, value_name = "FILE")]
+        catalog: Option<PathBuf>,
+
+        /// Station coordinates CSV used to find quiet periods
+        #[arg(long, value_name = "FILE")]
+        station_coords: Option<PathBuf>,
+
+        /// Run only this band of the config's band list (repeatable)
+        #[arg(long, value_name = "NAME")]
+        band: Vec<String>,
+
+        /// Reuse the chaos parameters of a previous run's *_calibration.json
+        /// instead of estimating them from this run's quiet periods
+        #[arg(long, value_name = "FILE")]
+        calibration: Option<PathBuf>,
+
         /// Enable dry-run mode (validate config without processing)
         #[arg(long, default_value_t = false)]
         dry_run: bool,

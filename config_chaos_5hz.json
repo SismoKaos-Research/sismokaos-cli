@@ -11,8 +11,9 @@
   "chaos_dim": 5,
   "chaos_evolve": 5,
   "chaos_min_samples": 500,
-  "chaos_slope_ros": [0.5, 5.0, 5.0, 20.0],
   "chaos_mean_period": 1.0,
+  "chaos_ros_rise": [0.1, 0.9],
+  "chaos_ros_horizon": 20.0,
   "chaos_sampent_m": 2,
   "chaos_sampent_r": 0.2
 }
